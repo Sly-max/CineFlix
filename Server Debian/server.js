@@ -64,6 +64,7 @@ const JELLYSEERR_KEY = 'MTc5NDUyMzU3Nzg2MjU4N2M2ZDI2LWNjYzgtNDhjNy05YzUxLTJiMmFk
 const JELLYFIN_KEY = 'b6f6b7dd9839425a92f1b10229451eb9';
 const PROWLARR_KEY = 'b6a19f6686974f4d89298040c9efafda';
 const searchCache = new Map();
+const torrentMetadata = new Map();
 
 let qbitCookie = '';
 let qbitCookieExpiry = 0;
@@ -80,7 +81,7 @@ function httpRequest(options, body) {
       });
     });
     req.on('error', reject);
-    req.setTimeout(25000, () => { req.destroy(new Error('Timeout')); });
+    req.setTimeout(options.timeout || 25000, () => { req.destroy(new Error('Timeout')); });
     if (body) req.write(typeof body === 'string' ? body : JSON.stringify(body));
     req.end();
   });
@@ -250,7 +251,7 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
       path: '/api/v3/blocklist',
       method: 'GET',
       headers: { 'X-Api-Key': RADARR_KEY }
-    });
+    }).catch(() => ({ data: [] }));
     if (rBlock.data && Array.isArray(rBlock.data.records)) {
       for (const b of rBlock.data.records) {
         const matchesHash = hash && b.sourceTitle && b.sourceTitle.toLowerCase().includes(hash.toLowerCase());
@@ -267,6 +268,30 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
       }
     }
 
+    // Purge any blocked records from Sonarr blocklist matching this hash or name
+    const sBlock = await httpRequest({
+      hostname: '127.0.0.1',
+      port: 8989,
+      path: '/api/v3/blocklist',
+      method: 'GET',
+      headers: { 'X-Api-Key': SONARR_KEY }
+    }).catch(() => ({ data: [] }));
+    if (sBlock.data && Array.isArray(sBlock.data.records)) {
+      for (const b of sBlock.data.records) {
+        const matchesHash = hash && b.sourceTitle && b.sourceTitle.toLowerCase().includes(hash.toLowerCase());
+        const matchesName = name && b.sourceTitle && b.sourceTitle.toLowerCase().includes((name || '').toLowerCase().substring(0, 15));
+        if (matchesHash || matchesName) {
+          await httpRequest({
+            hostname: '127.0.0.1',
+            port: 8989,
+            path: `/api/v3/blocklist/${b.id}`,
+            method: 'DELETE',
+            headers: { 'X-Api-Key': SONARR_KEY }
+          }).catch(() => {});
+        }
+      }
+    }
+
     // Fully delete movie from Radarr database so it never gets stuck with hasFile: true
     const allMovies = await httpRequest({
       hostname: '127.0.0.1',
@@ -274,7 +299,7 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
       path: '/api/v3/movie',
       method: 'GET',
       headers: { 'X-Api-Key': RADARR_KEY }
-    });
+    }).catch(() => ({ data: [] }));
     if (Array.isArray(allMovies.data)) {
       const cleanTarget = (name || '').toLowerCase().replace(/[^a-z0-9]/g, ' ');
       for (const m of allMovies.data) {
@@ -313,6 +338,13 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
       if (fs.existsSync(full)) {
         try { fs.rmSync(full, { recursive: true, force: true }); } catch (e) {}
       }
+      const auxExts = ['.es.vtt', '.es.srt', '.srt', '.vtt', '.keyframes.json'];
+      for (const ext of auxExts) {
+        const aux = full + ext;
+        if (fs.existsSync(aux)) {
+          try { fs.rmSync(aux, { force: true }); } catch(e) {}
+        }
+      }
     }
   }
 
@@ -332,6 +364,7 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
 
   // 5. Invalidate searchCache & mediaProbeCache so next requests fetch cleanly
   searchCache.clear();
+  if (hash) torrentMetadata.delete(hash.toLowerCase());
   for (const k of Object.keys(mediaProbeCache)) {
     if ((name && k.toLowerCase().includes((name || '').toLowerCase().substring(0, 15))) || (realContentPath && k.includes(path.basename(realContentPath)))) {
       delete mediaProbeCache[k];
@@ -475,12 +508,17 @@ function probeMedia(filePath) {
         }
         const preferredAudioIndex = preferredAudio ? preferredAudio.index : (audioTracks[0] ? audioTracks[0].index : null);
 
-        // Find spanish subtitle stream
+        // Find spanish subtitle stream (prefer text subtitle formats like srt, subrip, ass, webvtt)
         const spaSub = subs.find(s => {
           const lang = s.tags && s.tags.language ? s.tags.language.toLowerCase() : '';
-          return lang.startsWith('spa') || lang.startsWith('es');
+          const title = s.tags && s.tags.title ? s.tags.title.toLowerCase() : '';
+          return lang.startsWith('spa') || lang.startsWith('es') || title.includes('spanish') || title.includes('español') || title.includes('castellano') || title.includes('latino');
         });
-        const spanishSubIndex = spaSub ? spaSub.index : (subs.length > 0 ? subs[0].index : null);
+
+        let spanishSubIndex = null;
+        if (spaSub && ['subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text'].includes((spaSub.codec_name || '').toLowerCase())) {
+          spanishSubIndex = spaSub.index;
+        }
 
         const res = {
           duration,
@@ -1060,12 +1098,16 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
     return 'WEBVTT\n\n';
   }
 
-  // 1. Check if an external .srt already exists on disk
+  // 1. Check if an external .vtt or .srt already exists on disk
   const dir = path.dirname(filePath);
   const baseName = path.basename(filePath, path.extname(filePath));
   const candidateSubs = [
+    `${filePath}.es.vtt`,
+    `${filePath}.vtt`,
     `${filePath}.es.srt`,
     `${filePath}.srt`,
+    path.join(dir, `${baseName}.es.vtt`),
+    path.join(dir, `${baseName}.vtt`),
     path.join(dir, `${baseName}.es.srt`),
     path.join(dir, `${baseName}.srt`),
     path.join(dir, 'Spanish.srt'),
@@ -1079,15 +1121,18 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
     if (fs.existsSync(c)) {
       try {
         const content = fs.readFileSync(c, 'utf8');
-        if (content.length > 50) return srtToVtt(content);
+        if (content.length > 50) {
+          if (c.endsWith('.vtt')) return content;
+          return srtToVtt(content);
+        }
       } catch(e) {}
     }
   }
 
   // 2. Check if embedded text Spanish subtitle exists
-  const probe = await probeMedia(filePath);
-  if (probe.spanishSubIndex !== null) {
-    try {
+  try {
+    const probe = await probeMedia(filePath);
+    if (probe.spanishSubIndex !== null) {
       const vtt = await new Promise((resolve) => {
         const { spawn } = require('child_process');
         const ff = spawn('ffmpeg', [
@@ -1098,22 +1143,36 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
           'pipe:1'
         ]);
         let out = '';
+        const timer = setTimeout(() => {
+          try { ff.kill('SIGKILL'); } catch (e) {}
+          resolve(null);
+        }, 5000);
+
         ff.stdout.on('data', d => out += d);
         ff.on('close', code => {
+          clearTimeout(timer);
           if (code === 0 && out.length > 30) resolve(out);
           else resolve(null);
         });
-        ff.on('error', () => resolve(null));
+        ff.on('error', () => {
+          clearTimeout(timer);
+          resolve(null);
+        });
       });
-      if (vtt) return vtt;
-    } catch(e) {}
-  }
+
+      if (vtt && vtt.length > 50) {
+        try { fs.writeFileSync(`${filePath}.es.vtt`, vtt, 'utf8'); } catch(e) {}
+        return vtt;
+      }
+    }
+  } catch(e) {}
 
   // 3. Auto-fetch Spanish subtitles via OpenSubtitles v3 / Stremio using IMDb ID
   try {
+    const meta = torrentMetadata.get((rawId || '').toLowerCase()) || {};
     let imdbId = query.imdbId || null;
-    let tmdbId = query.tmdbId || null;
-    let mediaType = query.mediaType || 'movie';
+    let tmdbId = query.tmdbId || meta.tmdbId || null;
+    let mediaType = query.mediaType || meta.mediaType || 'movie';
 
     if (!imdbId && tmdbId) {
       const detail = await httpRequest({
@@ -1121,62 +1180,75 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
         port: 5055,
         path: `/api/v1/${mediaType}/${tmdbId}`,
         method: 'GET',
-        headers: { 'X-Api-Key': JELLYSEERR_KEY }
+        headers: { 'X-Api-Key': JELLYSEERR_KEY },
+        timeout: 3000
       }).catch(() => null);
       imdbId = detail?.data?.imdbId;
     }
 
     if (!imdbId) {
-      const cleanName = baseName
+      let cleanName = baseName
+        .replace(/\[.*?\]/g, '')
+        .replace(/\(.*?\)/g, '')
+        .replace(/\b(elitetorrent|dontorrent|cinecalidad|granmew|divx|yts|yify|rarbg|eztv|torrent|net|org|com|es)\b/gi, '')
         .replace(/\b(19|20)\d{2}\b/g, '')
         .replace(/\b(1080p|720p|2160p|4k|bluray|web-dl|webdl|webrip|x264|x265|h264|h265|aac|dts|multi|latino|castellano|hq|pre|ddp5|\d\.\d)\b/gi, '')
         .replace(/[._-]/g, ' ')
+        .replace(/[^a-zA-Z0-9 ]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
 
-      const jsSearch = await httpRequest({
-        hostname: '127.0.0.1',
-        port: 5055,
-        path: '/api/v1/search?query=' + encodeURIComponent(cleanName),
-        method: 'GET',
-        headers: { 'X-Api-Key': JELLYSEERR_KEY }
-      }).catch(() => null);
-
-      const match = jsSearch?.data?.results?.[0];
-      if (match && match.id) {
-        mediaType = match.mediaType || 'movie';
-        const detail = await httpRequest({
+      if (cleanName.length > 1) {
+        const jsSearch = await httpRequest({
           hostname: '127.0.0.1',
           port: 5055,
-          path: `/api/v1/${mediaType}/${match.id}`,
+          path: '/api/v1/search?query=' + encodeURIComponent(cleanName),
           method: 'GET',
-          headers: { 'X-Api-Key': JELLYSEERR_KEY }
+          headers: { 'X-Api-Key': JELLYSEERR_KEY },
+          timeout: 3000
         }).catch(() => null);
-        imdbId = detail?.data?.imdbId;
+
+        const match = jsSearch?.data?.results?.[0];
+        if (match && match.id) {
+          mediaType = match.mediaType || 'movie';
+          const detail = await httpRequest({
+            hostname: '127.0.0.1',
+            port: 5055,
+            path: `/api/v1/${mediaType}/${match.id}`,
+            method: 'GET',
+            headers: { 'X-Api-Key': JELLYSEERR_KEY },
+            timeout: 3000
+          }).catch(() => null);
+          imdbId = detail?.data?.imdbId;
+        }
       }
     }
 
     if (imdbId) {
       const subUrl = `https://opensubtitles-v3.strem.io/subtitles/${mediaType === 'tv' ? 'series' : 'movie'}/${imdbId}.json`;
       const subData = await new Promise((resolve) => {
-        https.get(subUrl, r => {
+        const req = https.get(subUrl, { timeout: 4000 }, r => {
           let d = '';
           r.on('data', c => d += c);
           r.on('end', () => {
             try { resolve(JSON.parse(d)); } catch(e) { resolve({}); }
           });
-        }).on('error', () => resolve({}));
+        });
+        req.on('error', () => resolve({}));
+        req.on('timeout', () => { req.destroy(); resolve({}); });
       });
 
       const spanishSubs = (subData.subtitles || []).filter(s => s.lang === 'spa' || s.lang === 'es');
       if (spanishSubs.length > 0) {
         const bestSub = spanishSubs[0];
         const srtContent = await new Promise((resolve) => {
-          https.get(bestSub.url, r => {
+          const req = https.get(bestSub.url, { timeout: 5000 }, r => {
             let d = '';
             r.on('data', c => d += c);
             r.on('end', () => resolve(d));
-          }).on('error', () => resolve(''));
+          });
+          req.on('error', () => resolve(''));
+          req.on('timeout', () => { req.destroy(); resolve(''); });
         });
 
         if (srtContent && srtContent.length > 100) {
@@ -1663,6 +1735,10 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
 
         const postData = `urls=${encodeURIComponent(downloadUrl)}&savepath=${encodeURIComponent('/downloads')}&category=cineflix&sequentialDownload=true&firstLastPiecePrio=true`;
 
+        if (infoHash) {
+          torrentMetadata.set(infoHash, { tmdbId, mediaType, title });
+        }
+
         await httpRequest({
           hostname: '127.0.0.1',
           port: 8080,
@@ -1824,6 +1900,10 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
 
         const postData = `urls=${encodeURIComponent(downloadUrl)}&savepath=${encodeURIComponent('/downloads')}&category=cineflix&sequentialDownload=true&firstLastPiecePrio=true`;
 
+        if (infoHash) {
+          torrentMetadata.set(infoHash, { tmdbId, mediaType, title });
+        }
+
         await httpRequest({
           hostname: '127.0.0.1',
           port: 8080,
@@ -1878,6 +1958,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
 
       const formatted = list.map(t => {
         const parsed = parseTorrentName(t.name, t.category);
+        const meta = torrentMetadata.get((t.hash || '').toLowerCase()) || {};
         return {
           hash: t.hash,
           name: t.name,
@@ -1887,6 +1968,8 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
           cleanLabel: parsed.cleanLabel,
           seasonStr: parsed.seasonStr,
           episodeStr: parsed.episodeStr,
+          tmdbId: meta.tmdbId || null,
+          mediaType: meta.mediaType || (parsed.isTv ? 'tv' : 'movie'),
           progress: Math.round(t.progress * 100),
           progressRaw: t.progress,
           dlspeed: t.dlspeed,
