@@ -1774,6 +1774,14 @@
     // Global catalog & downloads caches
     window.catalogItems = window.catalogItems || {};
     window.latestDownloads = window.latestDownloads || [];
+    const DEFAULT_POSTER = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='450' viewBox='0 0 300 450'><rect width='300' height='450' fill='%231e293b'/><text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' fill='%2394a3b8' font-family='sans-serif' font-size='18'>CineFlix</text></svg>";
+
+    function closeSeasonModal() {
+      closeReleasesModal();
+      const m = document.getElementById('seasonModal');
+      if (m) m.classList.remove('active');
+    }
+
     let heroFeaturedItem = null;
     function setupHeroFeatured(items) {
       if (!items || items.length === 0) return;
@@ -2067,7 +2075,7 @@
         return `
           <div class="card history-card" id="hist-card-${item.id}">
             <div class="poster-container" style="position: relative; cursor: pointer;" onclick="resumeHistoryItem('${item.id}')">
-              <img class="poster-img" src="${poster}" alt="${escapeHtml(item.title)}" loading="lazy">
+              <img class="poster-img" src="${poster}" alt="${escapeHtml(item.title)}" loading="lazy" onerror="this.onerror=null;this.src=DEFAULT_POSTER;">
               <div class="card-type ${isTv ? 'tv' : 'movie'}">${isTv ? 'Serie' : 'Película'}</div>
               ${epBadge ? `<div class="history-ep-badge">${epBadge}</div>` : ''}
               <button class="history-delete-btn" onclick="removeHistoryItem('${item.id}', event)" title="Quitar de la lista">✕</button>
@@ -2237,6 +2245,7 @@
         const res = await fetch('/api/catalog');
         const data = await res.json();
 
+        if (data.trending && data.trending.length > 0) setupHeroFeatured(data.trending);
         if (data.trending) renderShelf(data.trending, 'grid-trending');
         if (data.movies) renderShelf(data.movies, 'grid-movies');
         if (data.tv) renderShelf(data.tv, 'grid-tv');
@@ -2262,7 +2271,7 @@
       });
 
       container.innerHTML = items.map(item => {
-        const poster = item.poster || 'https://via.placeholder.com/500x750?text=Sin+Poster';
+        const poster = item.poster || DEFAULT_POSTER;
         const rating = item.rating ? ('★ ' + item.rating) : '';
         const isTv = item.mediaType === 'tv';
         const typeBadge = isTv ? 'Serie' : 'Película';
@@ -2274,8 +2283,8 @@
 
         return `
           <div class="card">
-            <div class="poster-container" onclick="handleCardClickById(${item.id})" style="cursor: pointer;">
-              <img class="poster-img" src="${poster}" alt="${escapeHtml(item.title)}" loading="lazy">
+            <div class="poster-container" onclick="handleCardClickById('${item.id}')" style="cursor: pointer;">
+              <img class="poster-img" src="${poster}" alt="${escapeHtml(item.title)}" loading="lazy" onerror="this.onerror=null;this.src=DEFAULT_POSTER;">
               <div class="card-type ${typeClass}">${typeBadge}</div>
               ${rating ? `<div class="card-rating">${rating}</div>` : ''}
               ${hasProgress ? `<div class="history-ep-badge" style="background: rgba(16, 185, 129, 0.95);">▶ ${formatTime(saved.lastTime)}</div>` : ''}
@@ -2285,11 +2294,11 @@
                 </div>` : ''}
             </div>
             <div class="card-content">
-              <div class="card-title" title="${escapeHtml(item.title)}" onclick="handleCardClickById(${item.id})" style="cursor: pointer;">${escapeHtml(item.title)}</div>
+              <div class="card-title" title="${escapeHtml(item.title)}" onclick="handleCardClickById('${item.id}')" style="cursor: pointer;">${escapeHtml(item.title)}</div>
               <div class="card-year">${item.year || ''} • Español Latino / Sub</div>
               <div class="card-desc">${escapeHtml(item.overview || '')}</div>
               <div style="margin-top: auto; padding-top: 8px;">
-                <button class="btn-explore-card" onclick="handleCardClickById(${item.id})">
+                <button class="btn-explore-card" onclick="handleCardClickById('${item.id}')">
                   ${isTv ? '📺 Explorar Temporadas' : '🎬 Ver Opciones y Versiones'}
                 </button>
               </div>
@@ -2466,7 +2475,7 @@
       });
 
       container.innerHTML = items.map(item => {
-        const poster = item.poster || 'https://via.placeholder.com/500x750?text=Sin+Poster';
+        const poster = item.poster || DEFAULT_POSTER;
         const rating = item.rating ? `★ ${item.rating}` : '';
         const isTv = item.mediaType === 'tv';
         const typeBadge = isTv ? 'Serie' : 'Película';
@@ -2475,17 +2484,17 @@
 
         return `
           <div class="card">
-            <div class="poster-container">
-              <img class="poster-img" src="${poster}" alt="${escapeHtml(item.title)}" loading="lazy">
+            <div class="poster-container" onclick="handleCardClickById('${item.id}')" style="cursor: pointer;">
+              <img class="poster-img" src="${poster}" alt="${escapeHtml(item.title)}" loading="lazy" onerror="this.onerror=null;this.src=DEFAULT_POSTER;">
               <div class="card-type ${typeClass}">${typeBadge}</div>
               ${rating ? `<div class="card-rating">${rating}</div>` : ''}
             </div>
             <div class="card-content">
-              <div class="card-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
+              <div class="card-title" title="${escapeHtml(item.title)}" onclick="handleCardClickById('${item.id}')" style="cursor: pointer;">${escapeHtml(item.title)}</div>
               <div class="card-year">${item.year || ''} • Español Latino / Sub</div>
               <div class="card-desc">${escapeHtml(item.overview || '')}</div>
               <div style="margin-top: auto; padding-top: 8px;">
-                <button class="btn-explore-card" onclick="handleCardClickById(${item.id})">
+                <button class="btn-explore-card" onclick="handleCardClickById('${item.id}')">
                   ${isTv ? '📺 Explorar Temporadas' : '🎬 Ver Opciones y Versiones'}
                 </button>
               </div>
@@ -2532,15 +2541,18 @@
       if (dirRow) dirRow.style.display = 'none';
       if (castRow) castRow.style.display = 'none';
 
-      const posterUrl = item.poster || 'https://via.placeholder.com/500x750?text=CineFlix';
-      if (posterImg) posterImg.src = posterUrl;
+      const posterUrl = item.poster || DEFAULT_POSTER;
+      if (posterImg) {
+        posterImg.src = posterUrl;
+        posterImg.onerror = () => { posterImg.src = DEFAULT_POSTER; };
+      }
       const backdropUrl = item.backdrop || posterUrl;
       if (heroHeader) heroHeader.style.backgroundImage = 'url("' + backdropUrl + '")';
 
       // 2. Fetch full metadata from backend (/api/details/)
       if (!tmdbId) return;
       try {
-        const res = await fetch('/api/details/' + mediaType + '/' + tmdbId);
+        const res = await fetch('/api/details/' + mediaType + '/' + encodeURIComponent(tmdbId) + '?title=' + encodeURIComponent(fallbackTitle || ''));
         const d = await res.json();
         if (d && !d.error) {
           if (titleElem) titleElem.innerText = d.title || fallbackTitle;
@@ -2602,8 +2614,8 @@
           }
 
           // Cast
-          if (d.cast && d.cast.length > 0 && castRow && castVal) {
-            castVal.innerText = d.cast.join(', ');
+          if (d.cast && castRow && castVal) {
+            castVal.innerText = Array.isArray(d.cast) ? d.cast.join(', ') : (d.cast || '');
             castRow.style.display = 'block';
           }
         }
@@ -2652,13 +2664,15 @@
       if (!container) return;
 
       let seasons = seriesSeasonsCache[tmdbId || title];
-      if (!seasons && tmdbId) {
+      if (!seasons && (tmdbId || title)) {
         try {
-          const res = await fetch('/api/tv-seasons?tmdbId=' + tmdbId);
-          const data = await res.json();
-          if (data.seasons && data.seasons.length > 0) {
-            seasons = data.seasons;
-            seriesSeasonsCache[tmdbId || title] = seasons;
+          const res = await fetch('/api/tv-seasons?tmdbId=' + encodeURIComponent(tmdbId || '') + '&title=' + encodeURIComponent(title || ''));
+          if (res.ok) {
+            const data = await res.json();
+            if (data.seasons && data.seasons.length > 0) {
+              seasons = data.seasons;
+              seriesSeasonsCache[tmdbId || title] = seasons;
+            }
           }
         } catch(e) {}
       }
@@ -2668,19 +2682,22 @@
       }
 
       const activeNum = activeSeason === 'all' ? 'all' : (parseInt(activeSeason, 10) || 1);
+      const safeTitle = escapeHtml(title || '').replace(/'/g, "\\'");
+      const safeTmdbId = escapeHtml(String(tmdbId || '')).replace(/'/g, "\\'");
+
       let chipsHtml = seasons.map(s => {
         const isAct = s.seasonNumber === activeNum;
         const actStyle = isAct 
           ? 'background: #38bdf8; color: #0f172a; font-weight: 800; border-color: #38bdf8;' 
           : 'background: rgba(255,255,255,0.08); color: #e4e4e7;';
-        return `<button class="quick-tag ${isAct ? 'active' : ''}" style="${actStyle} font-size: 0.8rem; cursor: pointer; padding: 4px 10px;" onclick="openReleasesModal('${escapeHtml(title).replace(/'/g, "\\'")}', '${year}', 'tv', '${tmdbId}', ${s.seasonNumber})">${s.name}</button>`;
+        return `<button class="quick-tag ${isAct ? 'active' : ''}" style="${actStyle} font-size: 0.8rem; cursor: pointer; padding: 4px 10px;" onclick="openReleasesModal('${safeTitle}', '${year || ''}', 'tv', '${safeTmdbId}', ${s.seasonNumber})">${s.name}</button>`;
       }).join('');
 
       const isAllAct = activeNum === 'all';
       const allStyle = isAllAct 
         ? 'background: #38bdf8; color: #0f172a; font-weight: 800; border-color: #38bdf8;' 
         : 'background: rgba(255,255,255,0.08); color: #e4e4e7;';
-      chipsHtml += `<button class="quick-tag ${isAllAct ? 'active' : ''}" style="${allStyle} font-size: 0.8rem; cursor: pointer; padding: 4px 10px;" onclick="openReleasesModal('${escapeHtml(title).replace(/'/g, "\\'")}', '${year}', 'tv', '${tmdbId}', 'all')">📥 Packs / Todas</button>`;
+      chipsHtml += `<button class="quick-tag ${isAllAct ? 'active' : ''}" style="${allStyle} font-size: 0.8rem; cursor: pointer; padding: 4px 10px;" onclick="openReleasesModal('${safeTitle}', '${year || ''}', 'tv', '${safeTmdbId}', 'all')">📥 Packs / Todas</button>`;
 
       container.innerHTML = chipsHtml;
     }
@@ -2963,7 +2980,7 @@
               <div class="release-title" title="${escapeHtml(r.title)}">${escapeHtml(r.title)}</div>
               <div class="release-meta">⚡ <strong>${r.seeders} personas compartiendo</strong> (Más semillas = descarga más rápida) • Red: <strong>${r.indexer}</strong></div>
             </div>
-            <button class="btn-release-play" onclick="triggerReleaseDownload('${encodeURIComponent(r.downloadUrl)}', '${encodeURIComponent(r.title)}', '${currentModalMediaType}', ${currentModalTmdbId})">
+            <button class="btn-release-play" onclick="triggerReleaseDownload('${encodeURIComponent(r.downloadUrl)}', '${encodeURIComponent(r.title)}', '${currentModalMediaType}', '${currentModalTmdbId}')">
               ▶ Descargar y Ver
             </button>
           </div>

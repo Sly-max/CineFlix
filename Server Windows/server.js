@@ -139,19 +139,76 @@ async function getStandaloneCatalog() {
 // Language & Quality Parser for Releases
 // -------------------------------------------------------------------------
 function parseLanguageAndQuality(title, sizeBytes = 0) {
-  const lower = title.toLowerCase();
-  let quality = '1080p';
-  if (/2160p|4k|uhd/i.test(lower)) quality = '4K';
-  else if (/1080p|fhd/i.test(lower)) quality = '1080p';
-  else if (/720p|hd/i.test(lower)) quality = '720p';
-  else if (/480p|sd/i.test(lower)) quality = '480p';
+  const t = title.toLowerCase();
 
-  const isLatino = /latino|dual-lat|lat-team|audio latino|audio-latino|cinecalidad/i.test(lower) || title.includes('🇲🇽');
-  const isCastellano = /castellano|español|spanish/i.test(lower) && !isLatino;
-  const isDual = /dual/i.test(lower);
+  // 1. Rigorous Detection of CAM / Cinema / Low Quality Recordings
+  const camRegex = /\b(cam|hdcam|hd-cam|hqcam|hq-cam|camrip|cam-rip|ts|hdts|hd-ts|telesync|tc|hdtc|hd-tc|telecine|screener|scr|dvdscr|predvd|1xbet|line\s*audio|cine|grabado)\b/i;
+  const isCam = camRegex.test(t) || /(camrip|hdcam|hdts|telesync|hdtc|telecine|hqcam)/i.test(t);
+
+  // 2. Detection of Ancient / Poor SD Quality (XviD / 480p / DVDRip)
+  const isAncientSD = /\b(480p|xvid|divx|dvdrip|vhsrip)\b/i.test(t);
+
+  // 3. Source Tag
+  let sourceType = 'digital';
+  let sourceTag = '💎 Digital Original';
+  if (isCam) {
+    sourceType = 'cam';
+    sourceTag = '⚠️ Grabado de Cine (Cámara / TS)';
+  } else if (isAncientSD) {
+    sourceType = 'sd';
+    sourceTag = '📺 Calidad Antigua (480p / DVD)';
+  }
+
+  // 4. Authentic Language Detection
+  const latinoRegex = /\b(latino|audio latino|dual latino|lat-team|mex|mexicano|latinoamericano|es-mx|es-la)\b|(\.latino\b|\.lat\b|\[lat\]|\(lat\)|\[audio\s*latino\])/i;
+  const isLatino = latinoRegex.test(t) || title.includes('🇲🇽') || /cinecalidad/i.test(t);
+
+  const castellanoRegex = /\b(castellano|español|es-es|spa|spanish)\b|(\.castellano\b|\.esp\b|\[castellano\]|\[esp\])/i;
+  const isCastellano = (castellanoRegex.test(t) || title.includes('🇪🇸')) && !isLatino;
+
+  const isMulti = /\b(multi|dual|multi-audio|dual-audio|mvo)\b/i.test(t);
+  const isDual = /\b(dual)\b/i.test(t);
   const isSpanish = isLatino || isCastellano;
+  const isSpanishAvailable = isSpanish || (isMulti && !isCam);
 
-  return { quality, isLatino, isCastellano, isDual, isSpanish };
+  // 5. Resolution & Real Quality Rank
+  let quality = '1080p Full HD';
+  let qualityRank = 3;
+
+  if (isCam) {
+    quality = '⚠️ Grabado de Cine (Calidad Pobre)';
+    qualityRank = 0;
+  } else if (isAncientSD) {
+    quality = '480p SD (Baja Calidad)';
+    qualityRank = 1;
+  } else if (/2160p|4k|uhd/i.test(t)) {
+    quality = '💎 4K UHD Original';
+    qualityRank = 4;
+  } else if (/1080p|fhd/i.test(t)) {
+    quality = (sizeBytes > 0 && sizeBytes < 1200000000) ? '1080p Ligero' : '1080p Full HD';
+    qualityRank = 3;
+  } else if (/720p|hd/i.test(t)) {
+    quality = '720p HD';
+    qualityRank = 2;
+  } else {
+    quality = (sizeBytes >= 1800000000) ? '1080p Digital' : '720p Digital';
+    qualityRank = 2;
+  }
+
+  return {
+    isCam,
+    isAncientSD,
+    sourceType,
+    sourceTag,
+    quality,
+    qualityRank,
+    isLatino,
+    isCastellano,
+    isDual,
+    isMulti,
+    isSpanish,
+    isSpanishAvailable
+  };
 }
 
 // -------------------------------------------------------------------------
@@ -162,7 +219,7 @@ async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null)
   try {
     let torrentioPath = '';
     if (mediaType === 'tv') {
-      const sNum = season ? (parseInt(season, 10) || 1) : 1;
+      const sNum = (season && season !== 'all') ? (parseInt(season, 10) || 1) : 1;
       torrentioPath = `series/${imdbId}:${sNum}:1.json`;
     } else {
       torrentioPath = `movie/${imdbId}.json`;
@@ -222,13 +279,14 @@ async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null)
       });
     }
 
-    // Sort releases: Latino first, then seeders
+    // Sort releases: Digital first before CAM, Spanish/Latino first, then seeders DESC
     results.sort((a, b) => {
-      if (a.isLatino && !b.isLatino) return -1;
-      if (!a.isLatino && b.isLatino) return 1;
-      if (a.isSpanish && !b.isSpanish) return -1;
-      if (!a.isSpanish && b.isSpanish) return 1;
-      return (b.seeders || 0) - (a.seeders || 0);
+      if (a.isCam !== b.isCam) return a.isCam ? 1 : -1;
+      const spaA = a.isSpanishAvailable ? 1 : 0;
+      const spaB = b.isSpanishAvailable ? 1 : 0;
+      if (spaA !== spaB) return spaB - spaA;
+      if (b.seeders !== a.seeders) return b.seeders - a.seeders;
+      return (b.qualityRank || 0) - (a.qualityRank || 0);
     });
 
     return results;
@@ -274,26 +332,23 @@ function startTorrentEngine(magnetUrl, title = '') {
     let maxLen = 0;
 
     engine.files.forEach(file => {
-      if (/\.(mp4|mkv|webm|avi|mov)$/i.test(file.name)) {
+      const isVideo = /\.(mp4|mkv|webm|avi|mov)$/i.test(file.name);
+      const isSample = /sample/i.test(file.name) || file.length < 50 * 1024 * 1024;
+      if (isVideo && !isSample) {
+        file.select();
         if (file.length > maxLen) {
           maxLen = file.length;
           largestFile = file;
         }
+      } else {
+        try { file.deselect(); } catch (e) {}
       }
     });
 
     if (largestFile) {
       engine.mainFile = largestFile;
       engine.contentPath = path.join(TORRENTS_DIR, largestFile.path);
-      largestFile.select(); // Prioritize sequential download of main video
     }
-
-    // Deselect non-video or sample files to save bandwidth
-    engine.files.forEach(f => {
-      if (f !== largestFile) {
-        try { f.deselect(); } catch (e) {}
-      }
-    });
   });
 
   engine.on('download', () => {
@@ -656,13 +711,73 @@ async function handleRequest(req, res) {
     }
   }
 
+  // 4b. TV Seasons Metadata
+  if (pathname === '/api/tv-seasons') {
+    let id = parsedUrl.query.tmdbId || parsedUrl.query.id;
+    const title = parsedUrl.query.title || '';
+    if (!id && !title) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Missing id or title' }));
+    }
+
+    try {
+      if (!id || !id.toString().startsWith('tt')) {
+        const searchRes = await fetchJson(`https://v3-cinemeta.strem.io/catalog/series/top/search=${encodeURIComponent(title || id)}.json`);
+        if (searchRes && searchRes.metas && searchRes.metas.length > 0) {
+          const match = searchRes.metas.find(m => m.id && m.id.startsWith('tt')) || searchRes.metas[0];
+          if (match && match.id) id = match.id;
+        }
+      }
+
+      if (id && id.toString().startsWith('tt')) {
+        const seriesData = await fetchJson(`https://v3-cinemeta.strem.io/meta/series/${id}.json`);
+        const meta = seriesData?.meta;
+        if (meta && Array.isArray(meta.videos) && meta.videos.length > 0) {
+          const seasonNums = Array.from(new Set(meta.videos.map(v => v.season).filter(s => s > 0))).sort((a, b) => a - b);
+          const seasons = seasonNums.map(s => ({
+            seasonNumber: s,
+            name: `Temporada ${s}`,
+            episodeCount: meta.videos.filter(v => v.season === s).length
+          }));
+
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          return res.end(JSON.stringify({ seasons }));
+        }
+      }
+
+      const fallbackSeasons = [1, 2, 3, 4, 5].map(n => ({
+        seasonNumber: n,
+        name: `Temporada ${n}`,
+        episodeCount: 10
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ seasons: fallbackSeasons }));
+    } catch (e) {
+      const fallbackSeasons = [1, 2, 3, 4, 5].map(n => ({
+        seasonNumber: n,
+        name: `Temporada ${n}`,
+        episodeCount: 10
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ seasons: fallbackSeasons }));
+    }
+  }
+
   // 5. Details (Cast, Director, Epilogue, Backdrop, Runtime)
   if (pathname.startsWith('/api/details/')) {
     const parts = pathname.replace('/api/details/', '').split('/');
-    const mediaType = parts[0] === 'tv' ? 'series' : 'movie';
-    const id = parts[1];
+    const mediaType = (parts[0] === 'tv' || parts[0] === 'series') ? 'series' : 'movie';
+    let id = parts[1];
 
     try {
+      if ((!id || !id.toString().startsWith('tt')) && parsedUrl.query.title) {
+        const searchRes = await fetchJson(`https://v3-cinemeta.strem.io/catalog/${mediaType}/top/search=${encodeURIComponent(parsedUrl.query.title)}.json`);
+        if (searchRes && searchRes.metas && searchRes.metas.length > 0) {
+          const match = searchRes.metas.find(m => m.id && m.id.startsWith('tt')) || searchRes.metas[0];
+          if (match && match.id) id = match.id;
+        }
+      }
+
       const data = await fetchJson(`https://v3-cinemeta.strem.io/meta/${mediaType}/${id}.json`);
       const meta = data?.meta;
       if (meta) {
@@ -671,6 +786,10 @@ async function handleRequest(req, res) {
           const match = meta.runtime.match(/(\d+)/);
           if (match) runtimeMinutes = parseInt(match[1], 10);
         }
+
+        const seasonsCount = (meta.videos && meta.videos.length > 0)
+          ? Array.from(new Set(meta.videos.map(v => v.season).filter(s => s > 0))).length
+          : 1;
 
         const details = {
           id: meta.id,
@@ -684,7 +803,9 @@ async function handleRequest(req, res) {
           runtimeMinutes: runtimeMinutes || 115,
           genres: meta.genres || [],
           director: Array.isArray(meta.director) ? meta.director.join(', ') : (meta.director || 'Desconocido'),
-          cast: Array.isArray(meta.cast) ? meta.cast.slice(0, 8).join(', ') : (meta.cast || '')
+          cast: Array.isArray(meta.cast) ? meta.cast.slice(0, 8) : [],
+          seasonsCount,
+          totalEpisodes: (meta.videos && meta.videos.length > 0) ? meta.videos.length : null
         };
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -700,15 +821,24 @@ async function handleRequest(req, res) {
   if (pathname === '/api/available-releases') {
     const title = (parsedUrl.query.title || '').trim();
     const mediaType = parsedUrl.query.mediaType || 'movie';
-    const imdbId = parsedUrl.query.tmdbId || parsedUrl.query.imdbId || parsedUrl.query.id;
+    let imdbId = parsedUrl.query.tmdbId || parsedUrl.query.imdbId || parsedUrl.query.id;
     const season = parsedUrl.query.season || null;
 
     try {
+      if ((!imdbId || !imdbId.toString().startsWith('tt')) && title) {
+        const cType = mediaType === 'tv' ? 'series' : 'movie';
+        const searchRes = await fetchJson(`https://v3-cinemeta.strem.io/catalog/${cType}/top/search=${encodeURIComponent(title)}.json`);
+        if (searchRes && searchRes.metas && searchRes.metas.length > 0) {
+          const match = searchRes.metas.find(m => m.id && m.id.startsWith('tt')) || searchRes.metas[0];
+          if (match && match.id) imdbId = match.id;
+        }
+      }
+
       const streams = await fetchTorrentioStreams(imdbId, mediaType, season);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ releases: streams }));
     } catch (e) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ releases: [] }));
     }
   }
