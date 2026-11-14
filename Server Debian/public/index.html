@@ -1599,11 +1599,20 @@
         </div>
 
         <!-- TV Seasons Switcher Bar (Visible only when exploring TV Series) -->
-        <div id="modalSeasonBar" style="display: none; margin-bottom: 14px; background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 10px; padding: 10px 14px; align-items: center; gap: 8px; flex-wrap: wrap;">
+        <div id="modalSeasonBar" style="display: none; margin-bottom: 10px; background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 10px; padding: 10px 14px; align-items: center; gap: 8px; flex-wrap: wrap;">
           <span style="font-size: 0.85rem; color: #38bdf8; font-weight: 700; display: flex; align-items: center; gap: 5px;">
             📺 Temporada:
           </span>
           <div id="modalSeasonChips" style="display: flex; gap: 6px; flex-wrap: wrap; flex: 1;">
+          </div>
+        </div>
+
+        <!-- TV Episodes Switcher Bar (Visible when exploring a specific Season) -->
+        <div id="modalEpisodeBar" style="display: none; margin-bottom: 14px; background: rgba(15, 23, 42, 0.75); border: 1px solid rgba(168, 85, 247, 0.25); border-radius: 10px; padding: 10px 14px; align-items: center; gap: 8px; flex-wrap: wrap;">
+          <span style="font-size: 0.85rem; color: #c084fc; font-weight: 700; display: flex; align-items: center; gap: 5px;">
+            🎬 Capítulos:
+          </span>
+          <div id="modalEpisodeChips" style="display: flex; gap: 6px; flex-wrap: wrap; flex: 1; max-height: 120px; overflow-y: auto;">
           </div>
         </div>
 
@@ -2651,13 +2660,14 @@
 
     // RELEASES MODAL LOGIC
     let currentModalSeason = null;
+    let currentModalEpisode = null;
 
     function refreshCurrentReleases() {
-      openReleasesModal(currentModalTitle, currentModalYear, currentModalMediaType, currentModalTmdbId, currentModalSeason, true);
+      openReleasesModal(currentModalTitle, currentModalYear, currentModalMediaType, currentModalTmdbId, currentModalSeason, currentModalEpisode, true);
     }
 
     const seriesSeasonsCache = {};
-    async function renderModalSeasonChips(title, year, tmdbId, activeSeason) {
+    async function renderModalSeasonChips(title, year, tmdbId, activeSeason, activeEpisode) {
       const container = document.getElementById('modalSeasonChips');
       if (!container) return;
 
@@ -2674,39 +2684,76 @@
       }
 
       if (!seasons || seasons.length === 0) {
-        seasons = [1, 2, 3, 4, 5, 6].map(n => ({ seasonNumber: n, name: `Temporada ${n}` }));
+        seasons = [1, 2, 3, 4, 5, 6].map(n => ({ seasonNumber: n, name: `Temporada ${n}`, episodeCount: 10 }));
       }
 
       const activeNum = activeSeason === 'all' ? 'all' : (parseInt(activeSeason, 10) || 1);
+      const safeTitle = escapeHtml(title || '').replace(/'/g, "\\'");
       let chipsHtml = seasons.map(s => {
         const isAct = s.seasonNumber === activeNum;
         const actStyle = isAct 
           ? 'background: #38bdf8; color: #0f172a; font-weight: 800; border-color: #38bdf8;' 
           : 'background: rgba(255,255,255,0.08); color: #e4e4e7;';
-        return `<button class="quick-tag ${isAct ? 'active' : ''}" style="${actStyle} font-size: 0.8rem; cursor: pointer; padding: 4px 10px;" onclick="openReleasesModal('${escapeHtml(title).replace(/'/g, "\\'")}', '${year}', 'tv', '${tmdbId}', ${s.seasonNumber})">${s.name}</button>`;
+        return `<button class="quick-tag ${isAct ? 'active' : ''}" style="${actStyle} font-size: 0.8rem; cursor: pointer; padding: 4px 10px;" onclick="openReleasesModal('${safeTitle}', '${year}', 'tv', '${tmdbId}', ${s.seasonNumber}, 1)">${s.name}</button>`;
       }).join('');
 
       const isAllAct = activeNum === 'all';
       const allStyle = isAllAct 
         ? 'background: #38bdf8; color: #0f172a; font-weight: 800; border-color: #38bdf8;' 
         : 'background: rgba(255,255,255,0.08); color: #e4e4e7;';
-      chipsHtml += `<button class="quick-tag ${isAllAct ? 'active' : ''}" style="${allStyle} font-size: 0.8rem; cursor: pointer; padding: 4px 10px;" onclick="openReleasesModal('${escapeHtml(title).replace(/'/g, "\\'")}', '${year}', 'tv', '${tmdbId}', 'all')">📥 Packs / Todas</button>`;
+      chipsHtml += `<button class="quick-tag ${isAllAct ? 'active' : ''}" style="${allStyle} font-size: 0.8rem; cursor: pointer; padding: 4px 10px;" onclick="openReleasesModal('${safeTitle}', '${year}', 'tv', '${tmdbId}', 'all', 'all')">📥 Packs / Todas</button>`;
 
       container.innerHTML = chipsHtml;
     }
 
-    async function openReleasesModal(title, year, mediaType, tmdbId, season = null, forceRefresh = false, resumeTime = null) {
+    function renderModalEpisodeChips(title, year, tmdbId, activeSeason, activeEpisode) {
+      const container = document.getElementById('modalEpisodeChips');
+      if (!container) return;
+
+      const seasons = seriesSeasonsCache[tmdbId || title] || [];
+      const sObj = seasons.find(s => s.seasonNumber == activeSeason);
+      const epCount = (sObj && sObj.episodeCount) ? sObj.episodeCount : 10;
+
+      const isPackAct = (activeEpisode === 'all');
+      const packStyle = isPackAct
+        ? 'background: #a855f7; color: #ffffff; font-weight: 800; border-color: #c084fc; box-shadow: 0 0 10px rgba(168, 85, 247, 0.4);'
+        : 'background: rgba(168, 85, 247, 0.15); color: #e9d5ff; border: 1px solid rgba(168, 85, 247, 0.35);';
+
+      const safeTitle = escapeHtml(title || '').replace(/'/g, "\\'");
+
+      let html = `<button class="quick-tag ${isPackAct ? 'active' : ''}" style="${packStyle} font-size: 0.8rem; cursor: pointer; padding: 4px 10px; border-radius: 6px;" onclick="openReleasesModal('${safeTitle}', '${year}', 'tv', '${tmdbId}', ${activeSeason}, 'all')">📦 Temporada ${activeSeason} Completa</button>`;
+
+      for (let i = 1; i <= epCount; i++) {
+        const isAct = (activeEpisode == i);
+        const epStyle = isAct
+          ? 'background: #38bdf8; color: #0f172a; font-weight: 800; border-color: #38bdf8;'
+          : 'background: rgba(255,255,255,0.08); color: #e4e4e7; border: 1px solid rgba(255,255,255,0.15);';
+        html += `<button class="quick-tag ${isAct ? 'active' : ''}" style="${epStyle} font-size: 0.8rem; cursor: pointer; padding: 4px 10px; border-radius: 6px;" onclick="openReleasesModal('${safeTitle}', '${year}', 'tv', '${tmdbId}', ${activeSeason}, ${i})">Cap. ${i}</button>`;
+      }
+
+      container.innerHTML = html;
+    }
+
+    async function openReleasesModal(title, year, mediaType, tmdbId, season = null, episode = null, forceRefresh = false, resumeTime = null) {
       currentModalTitle = title;
       currentModalYear = year || '';
       currentModalMediaType = mediaType || 'movie';
       currentModalTmdbId = tmdbId || 0;
-      currentModalSeason = (mediaType === 'tv' && !season) ? 1 : (season || '');
+      const isTv = currentModalMediaType === 'tv';
+
+      if (isTv) {
+        currentModalSeason = (season === 'all') ? 'all' : (season ? (parseInt(season, 10) || 1) : 1);
+        currentModalEpisode = (currentModalSeason === 'all') ? 'all' : (episode !== null && episode !== undefined ? episode : 1);
+      } else {
+        currentModalSeason = '';
+        currentModalEpisode = '';
+      }
       currentReleaseFilter = 'digital';
 
       // Resume banner check
       const resumeBanner = document.getElementById('modalResumeBanner');
       if (resumeBanner) {
-        const saved = getHistoryItemForMedia(tmdbId, mediaType, currentModalSeason);
+        const saved = getHistoryItemForMedia(tmdbId, mediaType, currentModalSeason, currentModalEpisode);
         if (saved && saved.lastTime > 15 && !saved.completed) {
           resumeBanner.style.display = 'flex';
           const rTitle = document.getElementById('modalResumeTitle');
@@ -2723,28 +2770,49 @@
         }
       }
 
-      const isTv = currentModalMediaType === 'tv';
-
       // Load rich cinematic details (hero backdrop, poster, duration, genres, epilogue, cast, director)
       fetchModalDetails(currentModalMediaType, currentModalTmdbId, title, year);
 
       const seasonBar = document.getElementById('modalSeasonBar');
+      const episodeBar = document.getElementById('modalEpisodeBar');
       if (seasonBar) {
         if (isTv) {
           seasonBar.style.display = 'flex';
-          renderModalSeasonChips(title, year, tmdbId, currentModalSeason);
+          await renderModalSeasonChips(title, year, tmdbId, currentModalSeason, currentModalEpisode);
+          if (episodeBar) {
+            if (currentModalSeason === 'all') {
+              episodeBar.style.display = 'none';
+            } else {
+              episodeBar.style.display = 'flex';
+              renderModalEpisodeChips(title, year, tmdbId, currentModalSeason, currentModalEpisode);
+            }
+          }
         } else {
           seasonBar.style.display = 'none';
+          if (episodeBar) episodeBar.style.display = 'none';
         }
       }
 
-      const seasonLabel = currentModalSeason ? (currentModalSeason === 'all' ? ' (Packs Completos)' : ' (Temporada ' + currentModalSeason + ')') : '';
-      document.getElementById('releasesModalTitle').innerText = title + seasonLabel + (year && !seasonLabel ? ' (' + year + ')' : '');
+      let epLabel = '';
+      if (isTv) {
+        if (currentModalSeason === 'all') epLabel = ' (Colección Completa)';
+        else if (currentModalEpisode === 'all') epLabel = ` (Temporada ${currentModalSeason} Completa)`;
+        else epLabel = ` (T${currentModalSeason}:E${currentModalEpisode})`;
+      }
+      document.getElementById('releasesModalTitle').innerText = title + epLabel + (year && !epLabel ? ' (' + year + ')' : '');
       const modalSub = document.getElementById('releasesModalSubtitle');
       if (modalSub) {
-        modalSub.innerText = isTv 
-          ? `Explorando ${seasonLabel || 'Temporada 1'} en Cinecalidad, TorrentGalaxy, ThePirateBay, 1337x...`
-          : 'Consultando 28 repertorios activos (Cinecalidad, TorrentGalaxy, ThePirateBay, 1337x, Wolfmax4k)...';
+        if (isTv) {
+          if (currentModalSeason === 'all') {
+            modalSub.innerText = 'Explorando Colección Completa (Packs de todas las temporadas)...';
+          } else if (currentModalEpisode === 'all') {
+            modalSub.innerText = `Explorando Temporada ${currentModalSeason} Completa (Packs con todos los episodios)...`;
+          } else {
+            modalSub.innerText = `Explorando Temporada ${currentModalSeason}, Capítulo ${currentModalEpisode} en repertorios de alta velocidad...`;
+          }
+        } else {
+          modalSub.innerText = 'Consultando 28 repertorios activos (Cinecalidad, TorrentGalaxy, ThePirateBay, 1337x, Wolfmax4k)...';
+        }
       }
 
       document.getElementById('releasesLoading').style.display = 'block';
@@ -2756,8 +2824,9 @@
       document.getElementById('releasesModal').classList.add('active');
 
       try {
-        const seasonParam = season ? '&season=' + encodeURIComponent(season) : '';
-        const res = await fetch(`/api/available-releases?title=${encodeURIComponent(title)}&year=${encodeURIComponent(year || '')}&mediaType=${encodeURIComponent(currentModalMediaType || 'movie')}&tmdbId=${encodeURIComponent(currentModalTmdbId || '')}${seasonParam}${forceRefresh ? '&nocache=1&_t=' + Date.now() : ''}`);
+        const seasonParam = (isTv && currentModalSeason) ? '&season=' + encodeURIComponent(currentModalSeason) : '';
+        const epParam = (isTv && currentModalEpisode) ? '&episode=' + encodeURIComponent(currentModalEpisode) : '';
+        const res = await fetch(`/api/available-releases?title=${encodeURIComponent(title)}&year=${encodeURIComponent(year || '')}&mediaType=${encodeURIComponent(currentModalMediaType || 'movie')}&tmdbId=${encodeURIComponent(currentModalTmdbId || '')}${seasonParam}${epParam}${forceRefresh ? '&nocache=1&_t=' + Date.now() : ''}`);
         const data = await res.json();
         modalReleasesData = data.releases || [];
 
@@ -2928,6 +2997,10 @@
       }
 
       container.innerHTML = (extraNotice || "") + filtered.map(r => {
+        const packBadge = r.isSeasonPack
+          ? '<span class="badge-source pack" style="background: rgba(168, 85, 247, 0.25); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.5); font-weight: 800; padding: 3px 8px; border-radius: 6px; font-size: 0.75rem;">📦 Temporada Completa</span>'
+          : '';
+
         const sourceBadge = r.isCam
           ? '<span class="badge-source cam" style="background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); font-weight: 700; padding: 3px 8px; border-radius: 6px; font-size: 0.75rem;">⚠️ Grabación de Cine</span>'
           : (r.isAncientSD
@@ -2965,6 +3038,7 @@
             <div class="release-left">
               <div class="release-badges">
                 ${sourceBadge}
+                ${packBadge}
                 ${langBadge}
                 ${qualityBadge}
                 <span class="badge-size">📦 ${r.size}</span>

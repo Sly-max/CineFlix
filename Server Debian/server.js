@@ -826,19 +826,21 @@ async function resolveImdbId(title, tmdbId, mediaType = 'movie') {
   return null;
 }
 
-async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null) {
+async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null, episode = null, mode = 'normal') {
   if (!imdbId) return [];
   try {
     let torrentioPath = '';
     if (mediaType === 'tv') {
-      const sNum = season ? (parseInt(season, 10) || 1) : 1;
-      torrentioPath = `series/${imdbId}:${sNum}:1.json`;
+      const sNum = (season && season !== 'all') ? (parseInt(season, 10) || 1) : 1;
+      const eNum = (episode && episode !== 'all') ? (parseInt(episode, 10) || 1) : 1;
+      torrentioPath = `series/${imdbId}:${sNum}:${eNum}.json`;
     } else {
       torrentioPath = `movie/${imdbId}.json`;
     }
-    const torrentioUrl = `https://torrentio.strem.fun/stream/${torrentioPath}`;
+    // High-priority Spanish/Latino, sorted by seeders, minimum 1 seeder to strictly eliminate dead torrents
+    const torrentioUrl = `https://torrentio.strem.fun/sort=seeders%7Clanguage=spanish,latino%7Cminseeders=1/stream/${torrentioPath}`;
     const data = await new Promise((resolve) => {
-      const req = https.get(torrentioUrl, { timeout: 6000 }, r => {
+      const req = https.get(torrentioUrl, { timeout: 7000 }, r => {
         let body = '';
         r.on('data', chunk => body += chunk);
         r.on('end', () => {
@@ -866,12 +868,13 @@ async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null)
       if (!s.infoHash) continue;
       const titleLines = (s.title || '').split('\n');
       const rawTitle = titleLines[0] || (s.behaviorHints && s.behaviorHints.filename) || 'Release';
-      const metaLine = titleLines[1] || '';
 
-      const flagsLine = titleLines.slice(2).join(' ') || '';
+      // Find the metadata line that contains seeder / size / provider icons (robust for series packs and movies)
+      const metaLine = titleLines.find(l => l.includes('👤') || l.includes('💾') || l.includes('⚙️')) || '';
 
       const seedMatch = metaLine.match(/👤\s*(\d+)/);
       const seeders = seedMatch ? parseInt(seedMatch[1], 10) : 0;
+      if (seeders <= 0) continue; // STRICT FILTER: Ignore any dead torrents!
 
       const sizeMatch = metaLine.match(/💾\s*([\d\.]+)\s*(GB|MB|KB)/i);
       let sizeBytes = 0;
@@ -882,31 +885,49 @@ async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null)
         else if (unit === 'MB') sizeBytes = Math.round(val * 1024 * 1024);
         else sizeBytes = Math.round(val * 1024);
       } else {
-        sizeBytes = 2 * 1024 * 1024 * 1024;
+        sizeBytes = 1.5 * 1024 * 1024 * 1024;
       }
 
       const provMatch = metaLine.match(/⚙️\s*([^\n\r]+)/);
       const provider = provMatch ? provMatch[1].trim() : 'Torrentio';
 
-      const cleanFileName = (s.behaviorHints && s.behaviorHints.filename) || rawTitle;
+      // Flags line: all lines other than line 0 and metadata
+      const flagsLine = titleLines.filter(l => l !== rawTitle && l !== metaLine).join(' ');
+
+      const innerFileName = (titleLines.length > 1 && titleLines[1] !== metaLine) ? titleLines[1] : '';
+      const isPackTitle = /\b(complete|completa|temporada\s*\d+\s*completa|season\s*\d+\s*complete|s\d{1,2}(?:-s\d{1,2})?\s*complete|boxset|pack)\b/i.test(rawTitle) ||
+        (/\b(s\d{1,2}|temporada\s*\d+)\b/i.test(rawTitle) && !/\b([eE]\d{1,2}|cap\.?\s*\d{2,4}|episodio\s*\d+)\b/i.test(rawTitle));
+
+      let displayTitle = (s.behaviorHints && s.behaviorHints.filename) || rawTitle;
+      let isSeasonPack = isPackTitle;
+      if (mediaType === 'tv') {
+        if (mode === 'season_pack' || mode === 'all' || season === 'all' || episode === 'all') {
+          displayTitle = rawTitle;
+          isSeasonPack = true;
+        } else if (innerFileName) {
+          displayTitle = innerFileName;
+        }
+      }
+
+      const cleanFileName = displayTitle;
       const meta = parseLanguageAndQuality(cleanFileName, sizeBytes);
 
       // Check if flags line explicitly announces Multi Audio or Dual Audio with Spanish/Latino
-      const isMultiAudioTorrentio = /multi audio|dual audio/i.test(flagsLine) || /\b(multi|dual|multiaudio|dual-audio|dual-lat|lat-team)\b/i.test(cleanFileName);
-      const isCinecalidad = cleanFileName.toLowerCase().includes('cinecalidad') || provider.toLowerCase().includes('cinecalidad');
-      const isSpanishProvider = ['elitetorrent', 'divxtotal', 'grantorrent', 'wolfmax4k', 'estrenosdivx', 'descargas2020'].includes(provider.toLowerCase());
+      const isMultiAudioTorrentio = /multi audio|dual audio/i.test(flagsLine) || /\b(multi|dual|multiaudio|dual-audio|dual-lat|lat-team)\b/i.test(cleanFileName) || /\b(multi|dual|multiaudio|dual-audio|dual-lat|lat-team)\b/i.test(rawTitle);
+      const isCinecalidad = cleanFileName.toLowerCase().includes('cinecalidad') || rawTitle.toLowerCase().includes('cinecalidad') || provider.toLowerCase().includes('cinecalidad');
+      const isSpanishProvider = ['elitetorrent', 'divxtotal', 'grantorrent', 'wolfmax4k', 'estrenosdivx', 'descargas2020', 'mejortorrent'].includes(provider.toLowerCase());
 
-      if (isCinecalidad || /\b(audio[- .]latino|dual[- .]lat|lat[- .]team|es-mx|es-la)\b/i.test(cleanFileName) || (isMultiAudioTorrentio && flagsLine.includes('🇲🇽'))) {
+      if (isCinecalidad || /\b(audio[- .]latino|dual[- .]lat|lat[- .]team|es-mx|es-la)\b/i.test(cleanFileName) || /\b(audio[- .]latino|dual[- .]lat|lat[- .]team|es-mx|es-la)\b/i.test(rawTitle) || (isMultiAudioTorrentio && flagsLine.includes('🇲🇽'))) {
         meta.isLatino = true;
         meta.isSpanishAvailable = true;
         meta.langCode = 'latino';
         meta.langTag = isCinecalidad ? '🇲🇽 Cinecalidad Dual Latino' : '🇲🇽 Español Latino';
-      } else if (isSpanishProvider || /\b(castellano|español|espanol|audio[- .]castellano|es-es)\b/i.test(cleanFileName) || (isMultiAudioTorrentio && flagsLine.includes('🇪🇸'))) {
+      } else if (isSpanishProvider || /\b(castellano|español|espanol|audio[- .]castellano|es-es)\b/i.test(cleanFileName) || /\b(castellano|español|espanol|audio[- .]castellano|es-es)\b/i.test(rawTitle) || (isMultiAudioTorrentio && flagsLine.includes('🇪🇸'))) {
         meta.isCastellano = true;
         meta.isSpanishAvailable = true;
         meta.langCode = 'castellano';
         meta.langTag = '🇪🇸 Castellano';
-      } else if (flagsLine.includes('🇪🇸') || flagsLine.includes('🇲🇽') || /\b(sub|subs|subtitulado|subtitulos)\b/i.test(cleanFileName)) {
+      } else if (flagsLine.includes('🇪🇸') || flagsLine.includes('🇲🇽') || /\b(sub|subs|subtitulado|subtitulos)\b/i.test(cleanFileName) || /\b(sub|subs|subtitulado|subtitulos)\b/i.test(rawTitle)) {
         // Genuine Spanish subtitles present, but audio is original!
         meta.isLatino = false;
         meta.isCastellano = false;
@@ -931,6 +952,7 @@ async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null)
         sizeBytes,
         seeders,
         indexer: provider,
+        isSeasonPack,
         downloadUrl,
         infoHash: s.infoHash.toLowerCase(),
         ...meta
@@ -944,8 +966,8 @@ async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null)
   }
 }
 
-async function searchReleases(title, year, mediaType = 'movie', season = null, tmdbId = null, noCache = false) {
-  const cacheKey = `${title}_${year || ''}_${mediaType}_${season || ''}_${tmdbId || ''}`.toLowerCase();
+async function searchReleases(title, year, mediaType = 'movie', season = null, tmdbId = null, noCache = false, episode = null) {
+  const cacheKey = `${title}_${year || ''}_${mediaType}_${season || ''}_${episode || ''}_${tmdbId || ''}`.toLowerCase();
   const cached = searchCache.get(cacheKey);
   if (!noCache && cached && (Date.now() - cached.timestamp < 15 * 60 * 1000)) {
     return cached.releases;
@@ -958,18 +980,49 @@ async function searchReleases(title, year, mediaType = 'movie', season = null, t
     .trim();
 
   const queries = [];
+  let torrentioMode = 'normal';
+
   if (mediaType === 'tv') {
-    const sNum = season ? (parseInt(season, 10) || 1) : 1;
+    const isSeasonAll = (season === 'all');
+    const isEpisodeAll = (episode === 'all' || !episode);
+    const sNum = isSeasonAll ? 1 : (parseInt(season, 10) || 1);
     const sPadded = sNum < 10 ? `0${sNum}` : `${sNum}`;
-    queries.push(`${cleanTitle} Temporada ${sNum} latino`);
-    queries.push(`${cleanTitle} Temporada ${sNum} castellano`);
-    queries.push(`${cleanTitle} S${sPadded} latino`);
-    queries.push(`${cleanTitle} S${sPadded} castellano`);
-    queries.push(`${cleanTitle} Temporada ${sNum}`);
-    queries.push(`${cleanTitle} S${sPadded}`);
-    queries.push(`${cleanTitle} latino`);
-    queries.push(`${cleanTitle} castellano`);
-    queries.push(`${cleanTitle} español`);
+
+    if (isSeasonAll) {
+      // Exploring ALL seasons / series packs
+      torrentioMode = 'all';
+      queries.push(`${cleanTitle} Temporadas Completas`);
+      queries.push(`${cleanTitle} Temporadas Completas latino`);
+      queries.push(`${cleanTitle} Temporadas Completas castellano`);
+      queries.push(`${cleanTitle} Complete Series`);
+      queries.push(`${cleanTitle} Complete Series latino`);
+      queries.push(`${cleanTitle} S01`);
+      queries.push(`${cleanTitle} Complete`);
+    } else if (isEpisodeAll) {
+      // Exploring COMPLETE SEASON (Season pack)
+      torrentioMode = 'season_pack';
+      queries.push(`${cleanTitle} Temporada ${sNum} Completa`);
+      queries.push(`${cleanTitle} Temporada ${sNum} Completa latino`);
+      queries.push(`${cleanTitle} Temporada ${sNum} Completa castellano`);
+      queries.push(`${cleanTitle} S${sPadded} Complete`);
+      queries.push(`${cleanTitle} S${sPadded} Completa`);
+      queries.push(`${cleanTitle} Season ${sNum} Complete`);
+      queries.push(`${cleanTitle} Temporada ${sNum} latino`);
+      queries.push(`${cleanTitle} Temporada ${sNum} castellano`);
+      queries.push(`${cleanTitle} S${sPadded}`);
+    } else {
+      // Exploring a SPECIFIC EPISODE
+      torrentioMode = 'episode';
+      const eNum = parseInt(episode, 10) || 1;
+      const ePadded = eNum < 10 ? `0${eNum}` : `${eNum}`;
+      queries.push(`${cleanTitle} S${sPadded}E${ePadded}`);
+      queries.push(`${cleanTitle} S${sPadded}E${ePadded} latino`);
+      queries.push(`${cleanTitle} S${sPadded}E${ePadded} castellano`);
+      queries.push(`${cleanTitle} ${sNum}x${ePadded}`);
+      queries.push(`${cleanTitle} Temporada ${sNum} Capitulo ${eNum}`);
+      queries.push(`${cleanTitle} Cap.${sNum}${ePadded}`);
+      queries.push(`${cleanTitle} S${sPadded} Complete`); // Include season pack as fallback
+    }
   } else {
     queries.push(`${cleanTitle} latino`);
     queries.push(`${cleanTitle} castellano`);
@@ -995,7 +1048,7 @@ async function searchReleases(title, year, mediaType = 'movie', season = null, t
 
   // 3. Query Torrentio as soon as IMDb ID is resolved
   const torrentioPromise = imdbPromise
-    .then(imdbId => fetchTorrentioStreams(imdbId, mediaType, season))
+    .then(imdbId => fetchTorrentioStreams(imdbId, mediaType, season, episode, torrentioMode))
     .catch(() => []);
 
   const [responses, torrentioResults] = await Promise.all([prowlarrPromise, torrentioPromise]);
@@ -1003,9 +1056,9 @@ async function searchReleases(title, year, mediaType = 'movie', season = null, t
   const seenGuids = new Set();
   const allReleases = [];
 
-  // Add Torrentio streams first (authentic Cinecalidad, TorrentGalaxy, TPB with high seeds & language tags)
+  // Add Torrentio streams first (authentic Cinecalidad, Wolfmax4k, RARBG, etc. with verified seeds)
   for (const tr of torrentioResults) {
-    if (!tr.downloadUrl) continue;
+    if (!tr.downloadUrl || tr.seeders <= 0) continue;
     const id = tr.infoHash || tr.downloadUrl;
     if (seenGuids.has(id)) continue;
     seenGuids.add(id);
@@ -1013,10 +1066,13 @@ async function searchReleases(title, year, mediaType = 'movie', season = null, t
     allReleases.push(tr);
   }
 
-  // Add Prowlarr results
+  // Add Prowlarr results with strict filters
   for (const pRes of responses) {
     const list = Array.isArray(pRes.data) ? pRes.data : [];
     for (const r of list) {
+      // STRICT FILTER 1: Exclude 0-seeder dead torrents!
+      if (!r.seeders || r.seeders < 1) continue;
+
       const hashId = r.infoHash ? r.infoHash.toLowerCase() : null;
       const id = hashId || r.guid || r.downloadUrl;
       if (!id || seenGuids.has(id) || (hashId && seenGuids.has(hashId))) continue;
@@ -1027,6 +1083,39 @@ async function searchReleases(title, year, mediaType = 'movie', season = null, t
 
       // Exclude individual TV episodes when searching for a movie
       if (mediaType !== 'tv' && /\b([sS]\d{1,2}[eE]\d{1,2}|season\s*\d+|temporada\s*\d+|\d{1,2}x\d{1,2})\b/i.test(t)) continue;
+
+      // STRICT FILTER 2: TV Season & Episode mismatch filter
+      if (mediaType === 'tv' && season && season !== 'all') {
+        const reqS = parseInt(season, 10);
+        const sMatch = t.match(/\b(?:temporada|temp|season|s)\s*0?(\d{1,2})\b/i);
+        const capMatch = t.match(/\bcap\.?\s*(\d)(\d{2})\b/i);
+        const rangeMatch = t.match(/\b(?:s|season|temporada)\s*0?(\d{1,2})\s*[-–]\s*(?:s|season|temporada)?\s*0?(\d{1,2})\b/i);
+
+        if (rangeMatch) {
+          const startS = parseInt(rangeMatch[1], 10);
+          const endS = parseInt(rangeMatch[2], 10);
+          if (reqS < startS || reqS > endS) continue;
+        } else if (sMatch && parseInt(sMatch[1], 10) !== reqS) {
+          continue; // Mismatched season! Skip!
+        } else if (capMatch && parseInt(capMatch[1], 10) !== reqS) {
+          continue; // Mismatched season! Skip!
+        }
+
+        // If searching a specific episode:
+        if (episode && episode !== 'all') {
+          const reqE = parseInt(episode, 10);
+          const isFullPack = /\b(complete|completa|temporada\s*\d+\s*completa|season\s*\d+\s*complete)\b/i.test(t);
+          if (!isFullPack) {
+            const eMatch = t.match(/\b(?:e|ep|episodio|cap|capitulo)\s*0?(\d{1,2})\b/i);
+            if (eMatch && parseInt(eMatch[1], 10) !== reqE) {
+              continue; // Different single episode! Skip!
+            }
+            if (capMatch && parseInt(capMatch[2], 10) !== reqE) {
+              continue; // Different episode! Skip!
+            }
+          }
+        }
+      }
 
       // Exclude completely different franchise sequels if not part of user's title
       const franchiseDiffs = [
@@ -1044,8 +1133,8 @@ async function searchReleases(title, year, mediaType = 'movie', season = null, t
       }
       if (isDiffSequel) continue;
 
-      // Filter out >45GB bloat (bluray remuxes) and <150MB junk
-      if (r.size < 150000000 || r.size > 90000000000) continue;
+      // Filter out >90GB bloat and <100MB junk
+      if (r.size < 100000000 || r.size > 90000000000) continue;
       seenGuids.add(id);
       if (hashId) seenGuids.add(hashId);
 
@@ -1068,14 +1157,16 @@ async function searchReleases(title, year, mediaType = 'movie', season = null, t
 
       const verifiedIndexers = ['torrentio', 'cinecalidad', '1337x', 'thepiratebay', 'piratebay', 'torrentgalaxy', 'limetorrents', 'yts', 'eztv'];
       const isVerifiedIndexer = verifiedIndexers.some(vi => (r.indexer || '').toLowerCase().includes(vi));
+      const isSeasonPack = /\b(complete|completa|temporada\s*\d+\s*completa|season\s*\d+\s*complete|s\d{1,2}(?:-s\d{1,2})?\s*complete|boxset|pack)\b/i.test(t);
 
       allReleases.push({
         title: r.title,
         size: (r.size / 1024 / 1024 / 1024).toFixed(2) + ' GB',
         sizeBytes: r.size,
-        seeders: r.seeders || 0,
+        seeders: r.seeders || 1,
         indexer: r.indexer,
         isVerifiedIndexer,
+        isSeasonPack,
         downloadUrl: dlUrl,
         infoHash: hashId,
         ...meta
@@ -1085,7 +1176,7 @@ async function searchReleases(title, year, mediaType = 'movie', season = null, t
 
   // Smart sort:
   // 1) Digital Original ALWAYS before CAM
-  // 2) Season match boost if requested (for TV shows)
+  // 2) If season requested, boost releases matching season number
   // 3) Spanish / Multi audio first (Español Latino o Multi-Audio)
   // 3b) Verified indexers boost (reliable seeds vs stale dead scrapers)
   // 4) Seeders DESC (más semillas = descarga más rápida)
@@ -1095,9 +1186,8 @@ async function searchReleases(title, year, mediaType = 'movie', season = null, t
     if (a.isCam !== b.isCam) return a.isCam ? 1 : -1;
 
     // 2. If season requested, boost releases matching season number
-    if (season) {
+    if (season && season !== 'all') {
       const sNum = parseInt(season, 10) || 1;
-      const sPad = sNum < 10 ? `0${sNum}` : `${sNum}`;
       const matchA = new RegExp(`(s0?${sNum}\\b|temp(orada)?\\s*0?${sNum}\\b|season\\s*0?${sNum}\\b)`, 'i').test(a.title) ? 1 : 0;
       const matchB = new RegExp(`(s0?${sNum}\\b|temp(orada)?\\s*0?${sNum}\\b|season\\s*0?${sNum}\\b)`, 'i').test(b.title) ? 1 : 0;
       if (matchA !== matchB) return matchB - matchA;
@@ -1868,6 +1958,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
     const year = parsedUrl.query.year || '';
     const mediaType = parsedUrl.query.mediaType || 'movie';
     const season = parsedUrl.query.season || '';
+    const episode = parsedUrl.query.episode || '';
     const tmdbId = parsedUrl.query.tmdbId || '';
     const noCache = parsedUrl.query.nocache === '1';
     if (!title) {
@@ -1876,7 +1967,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
     }
 
     try {
-      const releases = await searchReleases(title, year, mediaType, season, tmdbId, noCache);
+      const releases = await searchReleases(title, year, mediaType, season, tmdbId, noCache, episode);
       const hasLatino = releases.some(r => r.isLatino);
       const hasCastellano = releases.some(r => r.isCastellano);
       const hasSpanish = releases.some(r => r.isSpanishAvailable || r.isLatino || r.isCastellano);

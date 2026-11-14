@@ -219,18 +219,21 @@ function parseLanguageAndQuality(title, sizeBytes = 0) {
 // -------------------------------------------------------------------------
 // Torrentio Releases Search (Direct Cloud Aggregator)
 // -------------------------------------------------------------------------
-async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null) {
+async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null, episode = null, mode = 'normal') {
   if (!imdbId) return [];
   try {
     let torrentioPath = '';
     if (mediaType === 'tv') {
       const sNum = (season && season !== 'all') ? (parseInt(season, 10) || 1) : 1;
-      torrentioPath = `series/${imdbId}:${sNum}:1.json`;
+      const eNum = (episode && episode !== 'all') ? (parseInt(episode, 10) || 1) : 1;
+      torrentioPath = `series/${imdbId}:${sNum}:${eNum}.json`;
     } else {
       torrentioPath = `movie/${imdbId}.json`;
     }
 
-    const data = await fetchJson(`https://torrentio.strem.fun/stream/${torrentioPath}`, 7000);
+    // High-priority Spanish/Latino, sorted by seeders, minimum 1 seeder to strictly eliminate dead torrents
+    const torrentioUrl = `https://torrentio.strem.fun/sort=seeders%7Clanguage=spanish,latino%7Cminseeders=1/stream/${torrentioPath}`;
+    const data = await fetchJson(torrentioUrl, 7000);
     if (!data || !Array.isArray(data.streams)) return [];
 
     const standardTrackers = [
@@ -247,10 +250,13 @@ async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null)
       if (!s.infoHash) continue;
       const titleLines = (s.title || '').split('\n');
       const rawTitle = titleLines[0] || (s.behaviorHints && s.behaviorHints.filename) || 'Release';
-      const metaLine = titleLines[1] || '';
+
+      // Find the metadata line that contains seeder / size / provider icons
+      const metaLine = titleLines.find(l => l.includes('👤') || l.includes('💾') || l.includes('⚙️')) || '';
 
       const seedMatch = metaLine.match(/👤\s*(\d+)/);
       const seeders = seedMatch ? parseInt(seedMatch[1], 10) : 0;
+      if (seeders <= 0) continue; // STRICT FILTER: Ignore any dead torrents!
 
       const sizeMatch = metaLine.match(/💾\s*([\d\.]+)\s*(GB|MB|KB)/i);
       let sizeBytes = 2 * 1024 * 1024 * 1024;
@@ -264,24 +270,40 @@ async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null)
 
       const provMatch = metaLine.match(/⚙️\s*([^\n\r]+)/);
       const provider = provMatch ? provMatch[1].trim() : 'Torrentio';
-      const flagsLine = titleLines.slice(2).join(' ') || '';
+      const flagsLine = titleLines.filter(l => l !== rawTitle && l !== metaLine).join(' ');
 
-      const cleanFileName = (s.behaviorHints && s.behaviorHints.filename) || rawTitle;
+      const innerFileName = (titleLines.length > 1 && titleLines[1] !== metaLine) ? titleLines[1] : '';
+      const isPackTitle = /\b(complete|completa|temporada\s*\d+\s*completa|season\s*\d+\s*complete|s\d{1,2}(?:-s\d{1,2})?\s*complete|boxset|pack)\b/i.test(rawTitle) ||
+        (/\b(s\d{1,2}|temporada\s*\d+)\b/i.test(rawTitle) && !/\b([eE]\d{1,2}|cap\.?\s*\d{2,4}|episodio\s*\d+)\b/i.test(rawTitle));
+
+      let displayTitle = (s.behaviorHints && s.behaviorHints.filename) || rawTitle;
+      let isSeasonPack = isPackTitle;
+      if (mediaType === 'tv') {
+        if (mode === 'season_pack' || mode === 'all' || season === 'all' || episode === 'all') {
+          displayTitle = rawTitle;
+          isSeasonPack = true;
+        } else if (innerFileName) {
+          displayTitle = innerFileName;
+        }
+      }
+
+      const cleanFileName = displayTitle;
       const meta = parseLanguageAndQuality(cleanFileName, sizeBytes);
 
       // Check if flags line explicitly announces Multi Audio or Dual Audio with Spanish/Latino
-      const isMultiAudioTorrentio = /multi audio|dual audio/i.test(flagsLine) || /\b(multi|dual|multiaudio|dual-audio|dual-lat|lat-team)\b/i.test(cleanFileName);
-      const isCinecalidad = cleanFileName.toLowerCase().includes('cinecalidad') || provider.toLowerCase().includes('cinecalidad');
+      const isMultiAudioTorrentio = /multi audio|dual audio/i.test(flagsLine) || /\b(multi|dual|multiaudio|dual-audio|dual-lat|lat-team)\b/i.test(cleanFileName) || /\b(multi|dual|multiaudio|dual-audio|dual-lat|lat-team)\b/i.test(rawTitle);
+      const isCinecalidad = cleanFileName.toLowerCase().includes('cinecalidad') || rawTitle.toLowerCase().includes('cinecalidad') || provider.toLowerCase().includes('cinecalidad');
+      const isSpanishProvider = ['elitetorrent', 'divxtotal', 'grantorrent', 'wolfmax4k', 'estrenosdivx', 'descargas2020', 'mejortorrent'].includes(provider.toLowerCase());
 
-      if (isCinecalidad || /\b(audio[- .]latino|dual[- .]lat|lat[- .]team|es-mx|es-la)\b/i.test(cleanFileName) || (isMultiAudioTorrentio && flagsLine.includes('🇲🇽'))) {
+      if (isCinecalidad || /\b(audio[- .]latino|dual[- .]lat|lat[- .]team|es-mx|es-la)\b/i.test(cleanFileName) || /\b(audio[- .]latino|dual[- .]lat|lat[- .]team|es-mx|es-la)\b/i.test(rawTitle) || (isMultiAudioTorrentio && flagsLine.includes('🇲🇽'))) {
         meta.isLatino = true;
         meta.isSpanishAvailable = true;
         meta.langTag = isCinecalidad ? '🇲🇽 Cinecalidad Dual Latino' : '🇲🇽 Español Latino';
-      } else if (/\b(castellano|español|espanol|audio[- .]castellano|es-es)\b/i.test(cleanFileName) || (isMultiAudioTorrentio && flagsLine.includes('🇪🇸'))) {
+      } else if (isSpanishProvider || /\b(castellano|español|espanol|audio[- .]castellano|es-es)\b/i.test(cleanFileName) || /\b(castellano|español|espanol|audio[- .]castellano|es-es)\b/i.test(rawTitle) || (isMultiAudioTorrentio && flagsLine.includes('🇪🇸'))) {
         meta.isCastellano = true;
         meta.isSpanishAvailable = true;
         meta.langTag = '🇪🇸 Castellano';
-      } else if (flagsLine.includes('🇪🇸') || flagsLine.includes('🇲🇽') || /\b(sub|subs|subtitulado|subtitulos)\b/i.test(cleanFileName)) {
+      } else if (flagsLine.includes('🇪🇸') || flagsLine.includes('🇲🇽') || /\b(sub|subs|subtitulado|subtitulos)\b/i.test(cleanFileName) || /\b(sub|subs|subtitulado|subtitulos)\b/i.test(rawTitle)) {
         // Genuine Spanish subtitles present, but audio is original!
         meta.isLatino = false;
         meta.isCastellano = false;
@@ -301,6 +323,7 @@ async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null)
         sizeBytes,
         seeders,
         indexer: provider,
+        isSeasonPack,
         downloadUrl,
         magnetUrl: downloadUrl,
         infoHash: s.infoHash.toLowerCase(),
@@ -878,6 +901,8 @@ async function handleRequest(req, res) {
     const mediaType = parsedUrl.query.mediaType || 'movie';
     let imdbId = parsedUrl.query.tmdbId || parsedUrl.query.imdbId || parsedUrl.query.id;
     const season = parsedUrl.query.season || null;
+    const episode = parsedUrl.query.episode || null;
+    const mode = (season === 'all' || episode === 'all') ? 'season_pack' : 'episode';
 
     try {
       if ((!imdbId || !imdbId.toString().startsWith('tt')) && title) {
@@ -889,7 +914,7 @@ async function handleRequest(req, res) {
         }
       }
 
-      const streams = await fetchTorrentioStreams(imdbId, mediaType, season);
+      const streams = await fetchTorrentioStreams(imdbId, mediaType, season, episode, mode);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ releases: streams }));
     } catch (e) {
