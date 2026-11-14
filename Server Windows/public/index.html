@@ -3466,11 +3466,11 @@
             } else {
               currentSelectedAudioTrack = firstAudioStreamIndex;
             }
-            // Direct mode only if browser audio is supported AND first track is selected
-            isDirectStreamMode = isBrowserAudio && (currentSelectedAudioTrack === firstAudioStreamIndex);
+            // Direct mode only if server confirms directStream AND default track is selected
+            isDirectStreamMode = !!info.directStream && (currentSelectedAudioTrack === firstAudioStreamIndex);
             renderAudioTrackButtons(info.audioTracks);
           } else {
-            isDirectStreamMode = isBrowserAudio;
+            isDirectStreamMode = !!info.directStream;
             trackBtns.innerHTML = '<button class="quick-tag active" style="border-radius: 9999px;">Audio Principal (Estéreo)</button>';
           }
         }
@@ -3501,6 +3501,15 @@
         try {
           const res = await fetch('/api/media-info/' + currentPlayingId);
           const info = await res.json();
+          if (!info || !info.ok) {
+            const bufferP = document.querySelector('#playerBufferingScreen p');
+            if (bufferP) {
+              bufferP.innerHTML = '<span style="color: #ef4444; font-weight: 600;">Archivo no disponible en disco o eliminado. Vuelve a iniciar la descarga.</span>';
+            }
+            clearInterval(bufferingInterval);
+            bufferingInterval = null;
+            return;
+          }
           if (info.ok) {
             const pct = info.progress !== undefined ? Math.round(info.progress * 100) : 0;
             const dlMB = info.downloadedBytes ? (info.downloadedBytes / 1024 / 1024).toFixed(1) : 0;
@@ -3527,7 +3536,6 @@
               if (bufferScreen) bufferScreen.style.display = 'none';
 
               window.currentMediaKeyframes = (info.keyframes && Array.isArray(info.keyframes)) ? info.keyframes : [];
-              const isBrowserAudio = ['aac', 'mp3', 'opus', 'flac'].includes((info.audioCodec || '').toLowerCase());
               if (info.audioTracks && info.audioTracks.length > 0) {
                 firstAudioStreamIndex = info.audioTracks[0].index;
                 if (info.preferredAudioIndex !== null && info.preferredAudioIndex !== undefined) {
@@ -3535,14 +3543,17 @@
                 } else {
                   currentSelectedAudioTrack = firstAudioStreamIndex;
                 }
-                isDirectStreamMode = isBrowserAudio && (currentSelectedAudioTrack === firstAudioStreamIndex);
+                isDirectStreamMode = !!info.directStream && (currentSelectedAudioTrack === firstAudioStreamIndex);
                 renderAudioTrackButtons(info.audioTracks);
+              } else {
+                isDirectStreamMode = !!info.directStream;
               }
               startNativePlayback(currentStreamOffset);
             }
           }
         } catch(e) {}
       }, 1500);
+    }
     }
 
     function renderAudioTrackButtons(tracks) {
@@ -3628,6 +3639,23 @@
 
         // Periodically persist watch progress
         saveCurrentPlaybackProgress(curMovieTime, mediaTotalDuration, false);
+      };
+
+      video.onplaying = () => {
+        const bs = document.getElementById('playerBufferingScreen');
+        if (bs) bs.style.display = 'none';
+      };
+
+      video.onerror = () => {
+        console.error('Video error:', video.error);
+        const bs = document.getElementById('playerBufferingScreen');
+        if (bs) {
+          bs.style.display = 'flex';
+          const p = bs.querySelector('p');
+          if (p) {
+            p.innerHTML = '<span style="color: #ef4444; font-weight: 600;">Error al decodificar el video en el navegador. Por favor prueba otra pista de audio o recarga la página.</span>';
+          }
+        }
       };
 
       video.onloadedmetadata = () => {

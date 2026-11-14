@@ -171,9 +171,9 @@ function parseLanguageAndQuality(title, sizeBytes = 0) {
   const isSpanish = isLatino || isCastellano;
   const isSpanishAvailable = isSpanish || (isMulti && !isCam);
 
-  // 5. Resolution & Real Quality Rank
+  // 5. Resolution & Real Quality Rank (1080p Full HD prioritized as #1 for fastest download & instant universal playback)
   let quality = '1080p Full HD';
-  let qualityRank = 3;
+  let qualityRank = 4;
 
   if (isCam) {
     quality = '⚠️ Grabado de Cine (Calidad Pobre)';
@@ -181,18 +181,23 @@ function parseLanguageAndQuality(title, sizeBytes = 0) {
   } else if (isAncientSD) {
     quality = '480p SD (Baja Calidad)';
     qualityRank = 1;
+  } else if (/1080p|fhd/i.test(t)) {
+    if (sizeBytes > 0 && sizeBytes < 1200000000) {
+      quality = '1080p Ligero';
+      qualityRank = 2;
+    } else {
+      quality = '💎 1080p Full HD (Nítido)';
+      qualityRank = 4;
+    }
   } else if (/2160p|4k|uhd/i.test(t)) {
     quality = '💎 4K UHD Original';
-    qualityRank = 4;
-  } else if (/1080p|fhd/i.test(t)) {
-    quality = (sizeBytes > 0 && sizeBytes < 1200000000) ? '1080p Ligero' : '1080p Full HD';
     qualityRank = 3;
   } else if (/720p|hd/i.test(t)) {
     quality = '720p HD';
     qualityRank = 2;
   } else {
     quality = (sizeBytes >= 1800000000) ? '1080p Digital' : '720p Digital';
-    qualityRank = 2;
+    qualityRank = (sizeBytes >= 1800000000) ? 4 : 2;
   }
 
   return {
@@ -418,8 +423,7 @@ function stopTorrentEngine(hash, name = '', contentPath = '') {
         const files = fs.readdirSync(TORRENTS_DIR);
         for (const f of files) {
           const lower = f.toLowerCase();
-          const cleanName = (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-          if ((hash && lower.includes(hash.toLowerCase())) || (cleanName && cleanName.length > 5 && lower.replace(/[^a-z0-9]/g, '').includes(cleanName.substring(0, 15)))) {
+          if (hash && lower.includes(hash.toLowerCase())) {
             try { fs.rmSync(path.join(TORRENTS_DIR, f), { recursive: true, force: true }); } catch (e) {}
           }
         }
@@ -429,7 +433,7 @@ function stopTorrentEngine(hash, name = '', contentPath = '') {
 
   // Clear media probe cache
   for (const k of Object.keys(mediaProbeCache)) {
-    if ((hash && k.toLowerCase().includes(hash.toLowerCase())) || (name && k.toLowerCase().includes((name || '').toLowerCase().substring(0, 15)))) {
+    if ((hash && k.toLowerCase().includes(hash.toLowerCase())) || (name && k.toLowerCase().includes((name || '').toLowerCase()))) {
       delete mediaProbeCache[k];
     }
   }
@@ -1004,8 +1008,10 @@ async function handleRequest(req, res) {
     }
 
     const info = await probeMedia(videoPath);
+    const ext = path.extname(videoPath).toLowerCase();
+    const canDirectStream = ['.mp4', '.m4v'].includes(ext) && !!info.isAudioCompatible;
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ...info, ready: info.duration > 0 }));
+    return res.end(JSON.stringify({ ...info, ready: info.duration > 0, directStream: canDirectStream }));
   }
 
 function isSpanishText(text) {
@@ -1296,8 +1302,10 @@ async function getOrFetchSpanishSubtitles(filePath, query = {}) {
       return res.end('Video not found or downloading initial pieces...');
     }
 
-    const seekSeconds = parseFloat(parsedUrl.query.ss || '0') || 0;
-    const audioTrack = parsedUrl.query.audio || null;
+    const seekSeconds = parseFloat(parsedUrl.query.t || parsedUrl.query.ss || '0') || 0;
+    const audioTrack = (parsedUrl.query.track !== undefined && parsedUrl.query.track !== '')
+      ? parsedUrl.query.track
+      : (parsedUrl.query.audio || null);
 
     res.writeHead(200, {
       'Content-Type': 'video/mp4',
@@ -1305,22 +1313,35 @@ async function getOrFetchSpanishSubtitles(filePath, query = {}) {
       'Cache-Control': 'no-cache'
     });
 
-    const ffmpegArgs = [];
+    const probe = await probeMedia(videoPath);
+    const isHevc = ['hevc', 'h265'].includes((probe.videoCodec || '').toLowerCase());
+
+    const ffmpegArgs = [
+      '-v', 'error',
+      '-analyzeduration', '2000000',
+      '-probesize', '2000000'
+    ];
     if (seekSeconds > 0) {
-      ffmpegArgs.push('-ss', seekSeconds.toString());
+      ffmpegArgs.push('-noaccurate_seek', '-ss', seekSeconds.toString());
     }
     ffmpegArgs.push('-i', videoPath);
 
     // Audio stream mapping
-    if (audioTrack) {
+    if (audioTrack !== null && audioTrack !== undefined && audioTrack !== '') {
       ffmpegArgs.push('-map', '0:v:0', '-map', `0:${audioTrack}`);
+    } else if (probe.preferredAudioIndex !== null && probe.preferredAudioIndex !== undefined) {
+      ffmpegArgs.push('-map', '0:v:0', '-map', `0:${probe.preferredAudioIndex}`);
     }
 
     ffmpegArgs.push(
       '-c:v', 'copy',
+      ...(isHevc ? ['-tag:v', 'hvc1'] : []),
       '-c:a', 'aac',
       '-b:a', '192k',
       '-ac', '2',
+      '-sn',
+      '-dn',
+      '-avoid_negative_ts', 'make_zero',
       '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
       '-f', 'mp4',
       'pipe:1'

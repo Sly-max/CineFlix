@@ -348,14 +348,17 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
     }
   }
 
-  // Scan TORRENTS_DIR to ensure no leftover partial folder matching name or partial title
+  // Scan TORRENTS_DIR to ensure no leftover partial folder matching realContentPath or exact name
   try {
     if (fs.existsSync(TORRENTS_DIR)) {
       const items = fs.readdirSync(TORRENTS_DIR);
       for (const item of items) {
-        if (realContentPath && item === path.basename(realContentPath)) {
+        const itemLower = item.toLowerCase();
+        const baseContent = realContentPath ? path.basename(realContentPath).toLowerCase() : null;
+        const nameLower = name ? name.toLowerCase() : null;
+        if (baseContent && (itemLower === baseContent || itemLower === baseContent + '.!qb')) {
           try { fs.rmSync(path.join(TORRENTS_DIR, item), { recursive: true, force: true }); } catch (e) {}
-        } else if (name && item.toLowerCase().includes(name.toLowerCase().substring(0, 15))) {
+        } else if (nameLower && (itemLower === nameLower || itemLower === nameLower + '.!qb')) {
           try { fs.rmSync(path.join(TORRENTS_DIR, item), { recursive: true, force: true }); } catch (e) {}
         }
       }
@@ -366,7 +369,7 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
   searchCache.clear();
   if (hash) torrentMetadata.delete(hash.toLowerCase());
   for (const k of Object.keys(mediaProbeCache)) {
-    if ((name && k.toLowerCase().includes((name || '').toLowerCase().substring(0, 15))) || (realContentPath && k.includes(path.basename(realContentPath)))) {
+    if ((name && k.toLowerCase().includes((name || '').toLowerCase())) || (realContentPath && k.includes(path.basename(realContentPath)))) {
       delete mediaProbeCache[k];
     }
   }
@@ -377,8 +380,8 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
       let hist = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8') || '[]');
       hist = hist.filter(h => {
         if (hash && h.hash && h.hash.toLowerCase() === hash.toLowerCase()) return false;
-        if (name && h.filename && h.filename.toLowerCase().includes((name || '').toLowerCase().substring(0, 15))) return false;
-        if (name && h.title && h.title.toLowerCase().includes((name || '').toLowerCase().substring(0, 15))) return false;
+        if (name && h.filename && h.filename.toLowerCase() === name.toLowerCase()) return false;
+        if (name && h.title && h.title.toLowerCase() === name.toLowerCase()) return false;
         return true;
       });
       fs.writeFileSync(HISTORY_FILE, JSON.stringify(hist, null, 2), 'utf8');
@@ -707,9 +710,9 @@ function parseLanguageAndQuality(title, sizeBytes = 0) {
     langTag = '🌐 Multi-Audio Internacional';
   }
 
-  // 5. Resolution & Real Quality Rank
+  // 5. Resolution & Real Quality Rank (1080p Full HD prioritized as #1 for fastest download & instant universal playback)
   let quality = '1080p Full HD';
-  let qualityRank = 3;
+  let qualityRank = 4;
 
   if (isCam) {
     quality = '⚠️ Grabado de Cine (Calidad Pobre)';
@@ -717,23 +720,23 @@ function parseLanguageAndQuality(title, sizeBytes = 0) {
   } else if (isAncientSD) {
     quality = '480p SD (Baja Calidad)';
     qualityRank = 1;
-  } else if (/2160p|4k|uhd/i.test(t)) {
-    quality = '💎 4K UHD Original';
-    qualityRank = 4;
   } else if (/1080p|fhd/i.test(t)) {
     if (sizeBytes > 0 && sizeBytes < 1200000000) {
       quality = '1080p Compacto (Bajo Bitrate)';
       qualityRank = 2;
     } else {
       quality = '💎 1080p Full HD (Nítido)';
-      qualityRank = 3;
+      qualityRank = 4;
     }
+  } else if (/2160p|4k|uhd/i.test(t)) {
+    quality = '💎 4K UHD Original';
+    qualityRank = 3;
   } else if (/720p|hd/i.test(t)) {
     quality = '720p HD';
     qualityRank = 2;
   } else {
     quality = (sizeBytes >= 1800000000) ? '1080p Digital' : '720p Digital';
-    qualityRank = 2;
+    qualityRank = (sizeBytes >= 1800000000) ? 4 : 2;
   }
 
   return {
@@ -2392,6 +2395,9 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
       probe = await probeMedia(filePath);
     }
 
+    const ext = path.extname(filePath).toLowerCase();
+    const canDirectStream = ['.mp4', '.m4v'].includes(ext) && !!probe.isAudioCompatible;
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({
       ok: true,
@@ -2399,6 +2405,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
       progress: progress,
       downloadedBytes: downloadedBytes,
       size: stat.size,
+      directStream: canDirectStream,
       keyframes: getKeyframesForFile(filePath),
       ...probe,
       filename: path.basename(filePath)
@@ -2492,13 +2499,17 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
       //    starting audio at the EXACT same keyframe packet with continuous ~0.08s frames.
       // 3. Client sets currentStreamOffset = getPrecedingKeyframe(startSec)
       // -> Audio, Video, and Subtitles are 100% in sync with 0ms gap!
+      const isHevc = ['hevc', 'h265'].includes((probe.videoCodec || '').toLowerCase());
       const ffArgs = [
         '-v', 'error',
+        '-analyzeduration', '2000000',
+        '-probesize', '2000000',
         ...(startSec > 0 ? ['-noaccurate_seek', '-ss', startSec.toString()] : []),
         '-i', filePath,
         '-map', '0:v:0',
         ...mapAudio,
         '-c:v', 'copy',
+        ...(isHevc ? ['-tag:v', 'hvc1'] : []),
         '-c:a', 'aac',
         '-b:a', '256k',
         '-ac', '2',
