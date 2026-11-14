@@ -12,6 +12,9 @@ if (!fs.existsSync(TORRENTS_DIR)) {
   try { fs.mkdirSync(TORRENTS_DIR, { recursive: true }); } catch(e) {}
 }
 
+// Microservices host (on Windows, connects to the Debian CineFlix stack on 192.168.1.205 or local)
+const SERVICES_HOST = process.env.SERVICES_HOST || '192.168.1.205';
+
 // Local portable FFmpeg resolution
 const localFfmpeg = path.join(__dirname, 'bin', 'ffmpeg.exe');
 const FFMPEG_BIN = fs.existsSync(localFfmpeg) ? localFfmpeg : 'ffmpeg';
@@ -44,7 +47,7 @@ const CATALOG_TTL = 30 * 60 * 1000; // 30 minutes cache
 async function fetchJellyseerrShelf(apiPath) {
   try {
     const res = await httpRequest({
-      hostname: '127.0.0.1',
+      hostname: SERVICES_HOST,
       port: 5055,
       path: apiPath,
       method: 'GET',
@@ -103,14 +106,14 @@ async function getQbitCookie() {
   try {
     const postData = 'username=admin&password=Taladro1';
     const res = await httpRequest({
-      hostname: '127.0.0.1',
+      hostname: SERVICES_HOST,
       port: 8080,
       path: '/api/v2/auth/login',
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'Content-Length': Buffer.byteLength(postData),
-        'Referer': 'http://127.0.0.1:8080'
+        'Referer': `http://${SERVICES_HOST}:8080`
       }
     }, postData);
     if (res.headers['set-cookie']) {
@@ -132,7 +135,7 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
   if (!realContentPath && hash) {
     try {
       const infoRes = await httpRequest({
-        hostname: '127.0.0.1',
+        hostname: SERVICES_HOST,
         port: 8080,
         path: '/api/v2/torrents/info?hashes=' + encodeURIComponent(hash),
         method: 'GET',
@@ -148,7 +151,7 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
   if (hash) {
     const postBody = `hashes=${encodeURIComponent(hash)}&deleteFiles=true`;
     await httpRequest({
-      hostname: '127.0.0.1',
+      hostname: SERVICES_HOST,
       port: 8080,
       path: '/api/v2/torrents/delete',
       method: 'POST',
@@ -163,7 +166,7 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
   // 3. Remove from Sonarr / Radarr queues and PURGE from Radarr database
   try {
     const sQueue = await httpRequest({
-      hostname: '127.0.0.1',
+      hostname: SERVICES_HOST,
       port: 8989,
       path: '/api/v3/queue',
       method: 'GET',
@@ -173,7 +176,7 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
       for (const rec of sQueue.data.records) {
         if (rec.downloadId && hash && rec.downloadId.toLowerCase() === hash.toLowerCase()) {
           await httpRequest({
-            hostname: '127.0.0.1',
+            hostname: SERVICES_HOST,
             port: 8989,
             path: `/api/v3/queue/${rec.id}?removeFromClient=true&blocklist=true`,
             method: 'DELETE',
@@ -184,7 +187,7 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
     }
 
     const rQueue = await httpRequest({
-      hostname: '127.0.0.1',
+      hostname: SERVICES_HOST,
       port: 7878,
       path: '/api/v3/queue',
       method: 'GET',
@@ -194,7 +197,7 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
       for (const rec of rQueue.data.records) {
         if (rec.downloadId && hash && rec.downloadId.toLowerCase() === hash.toLowerCase()) {
           await httpRequest({
-            hostname: '127.0.0.1',
+            hostname: SERVICES_HOST,
             port: 7878,
             path: `/api/v3/queue/${rec.id}?removeFromClient=true&blocklist=true`,
             method: 'DELETE',
@@ -206,7 +209,7 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
 
     // Fully delete movie from Radarr database so it never gets stuck with hasFile: true
     const allMovies = await httpRequest({
-      hostname: '127.0.0.1',
+      hostname: SERVICES_HOST,
       port: 7878,
       path: '/api/v3/movie',
       method: 'GET',
@@ -218,7 +221,7 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
         const mTitle = (m.title || '').toLowerCase().replace(/[^a-z0-9]/g, ' ');
         if (mTitle && cleanTarget && (cleanTarget.includes(mTitle) || mTitle.includes(cleanTarget.substring(0, 12)))) {
           await httpRequest({
-            hostname: '127.0.0.1',
+            hostname: SERVICES_HOST,
             port: 7878,
             path: `/api/v3/movie/${m.id}?deleteFiles=true&addImportExclusion=false`,
             method: 'DELETE',
@@ -625,7 +628,7 @@ async function resolveImdbId(title, tmdbId, mediaType = 'movie') {
   if (tmdbId) {
     try {
       const detail = await httpRequest({
-        hostname: '127.0.0.1',
+        hostname: SERVICES_HOST,
         port: 5055,
         path: `/api/v1/${mediaType}/${tmdbId}`,
         method: 'GET',
@@ -666,7 +669,7 @@ async function resolveImdbId(title, tmdbId, mediaType = 'movie') {
   // 3. Fallback to Jellyseerr search by title
   try {
     const jsSearch = await httpRequest({
-      hostname: '127.0.0.1',
+      hostname: SERVICES_HOST,
       port: 5055,
       path: '/api/v1/search?query=' + encodeURIComponent(clean),
       method: 'GET',
@@ -676,7 +679,7 @@ async function resolveImdbId(title, tmdbId, mediaType = 'movie') {
     if (match && match.id) {
       const mType = match.mediaType || mediaType || 'movie';
       const detail = await httpRequest({
-        hostname: '127.0.0.1',
+        hostname: SERVICES_HOST,
         port: 5055,
         path: `/api/v1/${mType}/${match.id}`,
         method: 'GET',
@@ -833,7 +836,7 @@ async function searchReleases(title, year, mediaType = 'movie', season = null, t
   const prowlarrPromise = Promise.all(
     queries.map(q =>
       httpRequest({
-        hostname: '127.0.0.1',
+        hostname: SERVICES_HOST,
         port: 9696,
         path: '/api/v1/search?query=' + encodeURIComponent(q),
         method: 'GET',
@@ -1032,7 +1035,7 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
 
     if (!imdbId && tmdbId) {
       const detail = await httpRequest({
-        hostname: '127.0.0.1',
+        hostname: SERVICES_HOST,
         port: 5055,
         path: `/api/v1/${mediaType}/${tmdbId}`,
         method: 'GET',
@@ -1050,7 +1053,7 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
         .trim();
 
       const jsSearch = await httpRequest({
-        hostname: '127.0.0.1',
+        hostname: SERVICES_HOST,
         port: 5055,
         path: '/api/v1/search?query=' + encodeURIComponent(cleanName),
         method: 'GET',
@@ -1061,7 +1064,7 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
       if (match && match.id) {
         mediaType = match.mediaType || 'movie';
         const detail = await httpRequest({
-          hostname: '127.0.0.1',
+          hostname: SERVICES_HOST,
           port: 5055,
           path: `/api/v1/${mediaType}/${match.id}`,
           method: 'GET',
@@ -1187,7 +1190,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
       let online = false;
       try {
         const check = await httpRequest({
-          hostname: '127.0.0.1',
+          hostname: SERVICES_HOST,
           port: s.port,
           path: '/',
           method: 'GET'
@@ -1227,7 +1230,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
                 .replace(/\b(1080p|720p|2160p|4k|uhd|bluray|webrip|proper|imax|dual|yg|x265|x264|hevc|ddp?5 1)\b/gi, '')
                 .trim();
               const sRes = await httpRequest({
-                hostname: '127.0.0.1',
+                hostname: SERVICES_HOST,
                 port: 5055,
                 path: '/api/v1/search?query=' + encodeURIComponent(cleanQ),
                 method: 'GET'
@@ -1308,7 +1311,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
 
     try {
       const resData = await httpRequest({
-        hostname: '127.0.0.1',
+        hostname: SERVICES_HOST,
         port: 5055,
         path: `/api/v1/${mediaType}/${tmdbId}?language=es`,
         method: 'GET',
@@ -1427,7 +1430,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
     }
     try {
       const searchRes = await httpRequest({
-        hostname: '127.0.0.1',
+        hostname: SERVICES_HOST,
         port: 5055,
         path: '/api/v1/search?query=' + encodeURIComponent(q) + '&language=es',
         method: 'GET',
@@ -1466,7 +1469,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
     }
     try {
       const tvRes = await httpRequest({
-        hostname: '127.0.0.1',
+        hostname: SERVICES_HOST,
         port: 5055,
         path: `/api/v1/tv/${tmdbId}?language=es`,
         method: 'GET',
@@ -1544,7 +1547,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
         const postData = `urls=${encodeURIComponent(downloadUrl)}&savepath=${encodeURIComponent('/downloads')}&category=cineflix&sequentialDownload=true&firstLastPiecePrio=true`;
 
         await httpRequest({
-          hostname: '127.0.0.1',
+          hostname: SERVICES_HOST,
           port: 8080,
           path: '/api/v2/torrents/add',
           method: 'POST',
@@ -1559,7 +1562,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
         setTimeout(async () => {
           try {
             const infoRes = await httpRequest({
-              hostname: '127.0.0.1',
+              hostname: SERVICES_HOST,
               port: 8080,
               path: '/api/v2/torrents/info?limit=5&sort=added_on&reverse=true',
               method: 'GET',
@@ -1569,7 +1572,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
             if (latest && latest.hash) {
               // Enable first & last piece priority
               await httpRequest({
-                hostname: '127.0.0.1',
+                hostname: SERVICES_HOST,
                 port: 8080,
                 path: '/api/v2/torrents/toggleFirstLastPiecePrio?hashes=' + latest.hash,
                 method: 'GET',
@@ -1578,7 +1581,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
 
               // Set sample / nfo / txt files to priority 0 so 100% bandwidth goes to the main movie
               const filesRes = await httpRequest({
-                hostname: '127.0.0.1',
+                hostname: SERVICES_HOST,
                 port: 8080,
                 path: '/api/v2/torrents/files?hash=' + latest.hash,
                 method: 'GET',
@@ -1596,7 +1599,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
                 if (ignoreIds.length > 0) {
                   const prioBody = `hash=${latest.hash}&id=${ignoreIds.join('|')}&priority=0`;
                   await httpRequest({
-                    hostname: '127.0.0.1',
+                    hostname: SERVICES_HOST,
                     port: 8080,
                     path: '/api/v2/torrents/filePrio',
                     method: 'POST',
@@ -1616,7 +1619,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
         if (mediaType === 'movie' && tmdbId) {
           try {
             const allMovies = await httpRequest({
-              hostname: '127.0.0.1',
+              hostname: SERVICES_HOST,
               port: 7878,
               path: '/api/v3/movie',
               method: 'GET',
@@ -1625,7 +1628,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
             const existing = Array.isArray(allMovies.data) ? allMovies.data.find(m => m.tmdbId === parseInt(tmdbId)) : null;
             if (existing) {
               await httpRequest({
-                hostname: '127.0.0.1',
+                hostname: SERVICES_HOST,
                 port: 7878,
                 path: `/api/v3/movie/${existing.id}?deleteFiles=false&addImportExclusion=false`,
                 method: 'DELETE',
@@ -1670,7 +1673,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
         const postData = `urls=${encodeURIComponent(bestRelease.downloadUrl)}&savepath=${encodeURIComponent('/downloads')}&category=cineflix&sequentialDownload=true&firstLastPiecePrio=true`;
 
         await httpRequest({
-          hostname: '127.0.0.1',
+          hostname: SERVICES_HOST,
           port: 8080,
           path: '/api/v2/torrents/add',
           method: 'POST',
@@ -1700,7 +1703,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
     try {
       const cookie = await getQbitCookie();
       const qRes = await httpRequest({
-        hostname: '127.0.0.1',
+        hostname: SERVICES_HOST,
         port: 8080,
         path: '/api/v2/torrents/info',
         method: 'GET',
@@ -1712,7 +1715,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
       for (const t of list) {
         if (!t.seq_dl) {
           httpRequest({
-            hostname: '127.0.0.1',
+            hostname: SERVICES_HOST,
             port: 8080,
             path: '/api/v2/torrents/toggleSequentialDownload?hashes=' + t.hash,
             method: 'GET',
@@ -1758,7 +1761,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
       const cookie = await getQbitCookie();
       const postBody = 'hashes=all&deleteFiles=true';
       await httpRequest({
-        hostname: '127.0.0.1',
+        hostname: SERVICES_HOST,
         port: 8080,
         path: '/api/v2/torrents/delete',
         method: 'POST',
@@ -1823,7 +1826,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
           try {
             const cookie = await getQbitCookie();
             const qRes = await httpRequest({
-              hostname: '127.0.0.1',
+              hostname: SERVICES_HOST,
               port: 8080,
               path: '/api/v2/torrents/info',
               method: 'GET',
@@ -1838,7 +1841,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
               if (matches.length > 0) {
                 const postBody = `hashes=${matches.map(m => m.hash).join('|')}&deleteFiles=true`;
                 await httpRequest({
-                  hostname: '127.0.0.1',
+                  hostname: SERVICES_HOST,
                   port: 8080,
                   path: '/api/v2/torrents/delete',
                   method: 'POST',
@@ -1855,7 +1858,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
           // Also remove from Sonarr if monitored
           try {
             const sonarrRes = await httpRequest({
-              hostname: '127.0.0.1',
+              hostname: SERVICES_HOST,
               port: 8989,
               path: '/api/v3/series',
               method: 'GET',
@@ -1865,7 +1868,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
               const target = sonarrRes.data.find(s => s.title.toLowerCase() === seriesName.toLowerCase() || seriesName.toLowerCase().includes(s.title.toLowerCase()));
               if (target) {
                 await httpRequest({
-                  hostname: '127.0.0.1',
+                  hostname: SERVICES_HOST,
                   port: 8989,
                   path: `/api/v3/series/${target.id}?deleteFiles=true`,
                   method: 'DELETE',
@@ -1893,7 +1896,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
     let torrentsList = [];
     try {
       const qRes = await httpRequest({
-        hostname: '127.0.0.1',
+        hostname: SERVICES_HOST,
         port: 8080,
         path: '/api/v2/torrents/info',
         method: 'GET',
@@ -1941,7 +1944,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
     let torrentsList = [];
     try {
       const qRes = await httpRequest({
-        hostname: '127.0.0.1',
+        hostname: SERVICES_HOST,
         port: 8080,
         path: '/api/v2/torrents/info',
         method: 'GET',
@@ -1972,7 +1975,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
     let torrentsList = [];
     try {
       const qRes = await httpRequest({
-        hostname: '127.0.0.1',
+        hostname: SERVICES_HOST,
         port: 8080,
         path: '/api/v2/torrents/info',
         method: 'GET',
@@ -2137,14 +2140,18 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
   }
 }
 
-// BIND TO MULTIPLE PORTS (80, 8088, 3000)
-const PORTS = [80, 8088, 3000];
-PORTS.forEach(p => {
-  const s = http.createServer(handleRequest);
-  s.listen(p, '0.0.0.0', () => {
-    console.log(`CineFlix Hub running at http://0.0.0.0:${p}`);
-  });
-  s.on('error', (err) => {
-    console.error(`Port ${p} listen error:`, err.message);
-  });
+// BIND SERVER PORT (Default 3000, fallback 8088)
+const PORT = process.env.PORT || 3000;
+const server = http.createServer(handleRequest);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`CineFlix Hub running at http://0.0.0.0:${PORT}`);
+});
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    const fallbackPort = 8088;
+    console.log(`Port ${PORT} in use, trying ${fallbackPort}...`);
+    server.listen(fallbackPort, '0.0.0.0');
+  } else {
+    console.error('Server error:', err);
+  }
 });
