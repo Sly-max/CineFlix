@@ -246,8 +246,13 @@ function startTorrentEngine(magnetUrl, title = '') {
   let hashMatch = magnetUrl.match(/xt=urn:btih:([a-zA-Z0-9]+)/i);
   let hash = hashMatch ? hashMatch[1].toLowerCase() : `t_${Date.now()}`;
 
+  // If engine already exists, restart it fresh to avoid piece or state locks
   if (activeTorrentEngines.has(hash)) {
-    return activeTorrentEngines.get(hash);
+    try {
+      const old = activeTorrentEngines.get(hash);
+      old.destroy();
+    } catch (e) {}
+    activeTorrentEngines.delete(hash);
   }
 
   const engine = torrentStream(magnetUrl, {
@@ -299,14 +304,59 @@ function startTorrentEngine(magnetUrl, title = '') {
   return engine;
 }
 
-function stopTorrentEngine(hash) {
-  if (activeTorrentEngines.has(hash)) {
+function stopTorrentEngine(hash, name = '', contentPath = '') {
+  const targets = new Set();
+  if (contentPath) targets.add(contentPath);
+
+  if (hash && activeTorrentEngines.has(hash.toLowerCase())) {
     try {
-      const eng = activeTorrentEngines.get(hash);
+      const eng = activeTorrentEngines.get(hash.toLowerCase());
+      if (eng.contentPath) targets.add(eng.contentPath);
       eng.destroy();
     } catch (e) {}
-    activeTorrentEngines.delete(hash);
+    activeTorrentEngines.delete(hash.toLowerCase());
   }
+
+  // Remove physical files and folders after engine destruction
+  setTimeout(() => {
+    for (const t of targets) {
+      if (fs.existsSync(t)) {
+        try { fs.rmSync(t, { recursive: true, force: true }); } catch (e) {}
+      }
+    }
+    try {
+      if (fs.existsSync(TORRENTS_DIR)) {
+        const files = fs.readdirSync(TORRENTS_DIR);
+        for (const f of files) {
+          const lower = f.toLowerCase();
+          const cleanName = (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          if ((hash && lower.includes(hash.toLowerCase())) || (cleanName && cleanName.length > 5 && lower.replace(/[^a-z0-9]/g, '').includes(cleanName.substring(0, 15)))) {
+            try { fs.rmSync(path.join(TORRENTS_DIR, f), { recursive: true, force: true }); } catch (e) {}
+          }
+        }
+      }
+    } catch (e) {}
+  }, 100);
+
+  // Clear media probe cache
+  for (const k of Object.keys(mediaProbeCache)) {
+    if ((hash && k.toLowerCase().includes(hash.toLowerCase())) || (name && k.toLowerCase().includes((name || '').toLowerCase().substring(0, 15)))) {
+      delete mediaProbeCache[k];
+    }
+  }
+
+  // Remove from server history
+  try {
+    if (fs.existsSync(HISTORY_FILE)) {
+      let hist = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8') || '[]');
+      hist = hist.filter(h => {
+        if (hash && h.hash && h.hash.toLowerCase() === hash.toLowerCase()) return false;
+        if (name && h.title && h.title.toLowerCase().includes((name || '').toLowerCase().substring(0, 15))) return false;
+        return true;
+      });
+      fs.writeFileSync(HISTORY_FILE, JSON.stringify(hist, null, 2), 'utf8');
+    }
+  } catch (e) {}
 }
 
 // -------------------------------------------------------------------------
@@ -726,18 +776,41 @@ async function handleRequest(req, res) {
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
       try {
-        const payload = JSON.parse(body);
-        if (payload.hash) stopTorrentEngine(payload.hash);
+        const payload = JSON.parse(body || '{}');
+        if (payload.hash) {
+          stopTorrentEngine(payload.hash, payload.name, payload.contentPath);
+        } else if (Array.isArray(payload.hashes)) {
+          payload.hashes.forEach(h => stopTorrentEngine(h, payload.seriesName, null));
+        }
       } catch (e) {}
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ ok: true }));
+      return res.end(JSON.stringify({ ok: true, message: 'Descarga cancelada y archivo eliminado del disco.' }));
     });
     return;
   }
 
   if (pathname === '/api/clean-cache') {
+    for (const [hash, eng] of activeTorrentEngines.entries()) {
+      try { eng.destroy(); } catch (e) {}
+    }
+    activeTorrentEngines.clear();
+
+    try {
+      if (fs.existsSync(TORRENTS_DIR)) {
+        const items = fs.readdirSync(TORRENTS_DIR);
+        for (const item of items) {
+          try { fs.rmSync(path.join(TORRENTS_DIR, item), { recursive: true, force: true }); } catch (e) {}
+        }
+      }
+    } catch (e) {}
+
+    for (const k of Object.keys(mediaProbeCache)) delete mediaProbeCache[k];
+    catalogCache = null;
+    catalogCacheTime = 0;
+    try { if (fs.existsSync(HISTORY_FILE)) fs.writeFileSync(HISTORY_FILE, '[]', 'utf8'); } catch (e) {}
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true }));
+    return res.end(JSON.stringify({ ok: true, message: 'Caché completamente limpio y espacio liberado' }));
   }
 
   // 10. Video Media Probing
