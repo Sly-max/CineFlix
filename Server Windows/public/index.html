@@ -2091,7 +2091,7 @@
       }).join('');
     }
 
-    function resumeHistoryItem(id) {
+    async function resumeHistoryItem(id) {
       const item = watchHistory.find(h => h.id === id);
       if (!item) return;
 
@@ -2131,23 +2131,37 @@
           item.lastTime,
           item
         );
-      } else if (item.hash) {
-        showToast('Reanudando "' + item.title + '" en ' + formatTime(item.lastTime) + '...', '▶');
-        playStream(
-          item.filename || item.title,
-          item.hash,
-          item.contentPath,
-          item.tmdbId,
-          item.mediaType,
-          item.lastTime,
-          item
-        );
       } else {
-        showToast('Abriendo opciones para reanudar "' + item.title + '" en ' + formatTime(item.lastTime) + '...', '🎬');
-        if (item.mediaType === 'tv') {
-          openReleasesModal(item.title, item.year, 'tv', item.tmdbId, item.season || 1, false, item.lastTime);
+        // If not in active downloads, verify if file is still accessible on disk before trying to play
+        let fileAvailable = false;
+        const checkId = item.hash || encodeURIComponent(item.filename || item.title);
+        if (checkId) {
+          try {
+            const res = await fetch('/api/media-info/' + checkId);
+            const data = await res.json();
+            if (data && data.ok) fileAvailable = true;
+          } catch(e) {}
+        }
+
+        if (fileAvailable) {
+          showToast('Reanudando "' + item.title + '" en ' + formatTime(item.lastTime) + '...', '▶');
+          playStream(
+            item.filename || item.title,
+            item.hash,
+            item.contentPath,
+            item.tmdbId,
+            item.mediaType,
+            item.lastTime,
+            item
+          );
         } else {
-          openReleasesModal(item.title, item.year, 'movie', item.tmdbId, null, false, item.lastTime);
+          // File was deleted from disk! Open versions modal so user can re-download with 1 click
+          showToast('El archivo fue eliminado del disco. Mostrando opciones para volver a descargarlo...', '🔍');
+          if (item.mediaType === 'tv') {
+            openReleasesModal(item.title, item.year, 'tv', item.tmdbId, item.season || 1, false, item.lastTime);
+          } else {
+            openReleasesModal(item.title, item.year, 'movie', item.tmdbId, null, false, item.lastTime);
+          }
         }
       }
     }
@@ -4001,6 +4015,17 @@
             contentPath: contentPath ? decodeURIComponent(contentPath) : ''
           })
         });
+
+        // Also remove matching item from watchHistory and localStorage so it doesn't linger pointing to deleted files
+        const cleanName = (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        watchHistory = watchHistory.filter(h => {
+          if (hash && h.hash && h.hash.toLowerCase() === hash.toLowerCase()) return false;
+          if (cleanName && h.filename && h.filename.toLowerCase().replace(/[^a-z0-9]/g, '').includes(cleanName.substring(0, 15))) return false;
+          return true;
+        });
+        localStorage.setItem('cineflix_watch_history', JSON.stringify(watchHistory));
+        renderContinueWatchingShelf();
+
         showToast('¡Descarga cancelada y archivo borrado por completo!', '✅');
         pollDownloads();
       } catch (e) {
@@ -4035,6 +4060,9 @@
         showToast('Vaciando caché y eliminando archivos temporales...', '🧹');
         const res = await fetch('/api/clean-cache', { method: 'POST' });
         const data = await res.json();
+        watchHistory = [];
+        localStorage.removeItem('cineflix_watch_history');
+        renderContinueWatchingShelf();
         showToast(data.message || 'Caché completamente limpio y espacio liberado', '✅');
         pollDownloads();
       } catch (e) {
