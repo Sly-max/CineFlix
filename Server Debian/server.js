@@ -113,6 +113,55 @@ async function getQbitCookie() {
   return qbitCookie;
 }
 
+function resolveRealTorrentUrl(downloadUrl) {
+  if (!downloadUrl) return Promise.resolve(null);
+  if (downloadUrl.startsWith('magnet:')) return Promise.resolve(downloadUrl);
+
+  return new Promise((resolve) => {
+    try {
+      const parsed = new url.URL(downloadUrl);
+      const isHttps = parsed.protocol === 'https:';
+      const client = isHttps ? https : http;
+
+      const req = client.request({
+        hostname: parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' ? '127.0.0.1' : parsed.hostname,
+        port: parsed.port || (isHttps ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+          'X-Api-Key': PROWLARR_KEY
+        }
+      }, (res) => {
+        // If 301, 302, 307 redirect (common for Prowlarr indexers redirecting to magnet)
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          const loc = res.headers.location;
+          if (loc.startsWith('magnet:')) {
+            return resolve(loc);
+          }
+          return resolveRealTorrentUrl(loc).then(resolve).catch(() => resolve(downloadUrl));
+        }
+
+        // If direct .torrent on 127.0.0.1, convert to container-accessible host IP
+        let safeUrl = downloadUrl.replace(/127\.0\.0\.1:9696/g, '192.168.1.205:9696').replace(/localhost:9696/g, '192.168.1.205:9696');
+        resolve(safeUrl);
+      });
+
+      req.on('error', () => {
+        let safeUrl = downloadUrl.replace(/127\.0\.0\.1:9696/g, '192.168.1.205:9696').replace(/localhost:9696/g, '192.168.1.205:9696');
+        resolve(safeUrl);
+      });
+      req.setTimeout(6000, () => {
+        req.destroy();
+        resolve(downloadUrl);
+      });
+      req.end();
+    } catch(e) {
+      resolve(downloadUrl);
+    }
+  });
+}
+
 // Complete removal of torrent and its physical files from disk and queue
 async function deleteTorrentAndFiles(hash, name, contentPath) {
   const cookie = await getQbitCookie();
@@ -1569,12 +1618,15 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
     req.on('end', async () => {
       try {
         const body = JSON.parse(bodyData || '{}');
-        const downloadUrl = body.downloadUrl || body.url;
+        let downloadUrl = body.downloadUrl || body.url;
         const title = body.title || '';
         const mediaType = body.mediaType || 'movie';
         const tmdbId = body.tmdbId;
 
         if (!downloadUrl) throw new Error('Missing download url');
+
+        // Resolve real magnet or container-accessible torrent URL
+        downloadUrl = await resolveRealTorrentUrl(downloadUrl);
 
         const cookie = await getQbitCookie();
 
@@ -1734,11 +1786,14 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
           return res.end(JSON.stringify({ ok: false, error: 'No se encontraron fuentes activas para este contenido.' }));
         }
 
+        // Resolve real magnet or container-accessible torrent URL
+        const downloadUrl = await resolveRealTorrentUrl(bestRelease.downloadUrl);
+
         const cookie = await getQbitCookie();
 
         // Extract infoHash if available and purge any stale instance in qBittorrent before re-adding
         let infoHash = null;
-        const hashMatch = bestRelease.downloadUrl.match(/xt=urn:btih:([a-zA-Z0-9]+)/i);
+        const hashMatch = downloadUrl.match(/xt=urn:btih:([a-zA-Z0-9]+)/i);
         if (hashMatch) {
           infoHash = hashMatch[1].toLowerCase();
           try {
@@ -1767,7 +1822,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
           } catch(e) {}
         }
 
-        const postData = `urls=${encodeURIComponent(bestRelease.downloadUrl)}&savepath=${encodeURIComponent('/downloads')}&category=cineflix&sequentialDownload=true&firstLastPiecePrio=true`;
+        const postData = `urls=${encodeURIComponent(downloadUrl)}&savepath=${encodeURIComponent('/downloads')}&category=cineflix&sequentialDownload=true&firstLastPiecePrio=true`;
 
         await httpRequest({
           hostname: '127.0.0.1',
