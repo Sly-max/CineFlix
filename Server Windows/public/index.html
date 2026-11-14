@@ -2404,11 +2404,11 @@
                     </div>
                   </div>
                   <div class="dl-actions">
-                    <button class="btn-stream-live" onclick="playStream('${encodeURIComponent(item.name)}', '${item.hash}', '${encodeURIComponent(item.contentPath || '')}', 157336, 'movie', null, { title: 'Interstellar', year: '2014', poster: 'https://image.tmdb.org/t/p/w500/d1QKiYtceF3GDtxvTFXFAqwwah9.jpg', backdrop: 'https://image.tmdb.org/t/p/w1280/8sNiAPPYU14PUepFNeSNGUTiHW.jpg', tmdbId: 157336 })">
+                    <button class="btn-stream-live" onclick="playStream('${encodeURIComponent(item.name)}', '${item.hash}', '${encodeURIComponent(item.contentPath || '')}', ${item.tmdbId || 'null'}, '${item.mediaType || 'tv'}')">
                       ▶ Ver en Vivo
                     </button>
-                    <button class="btn-stop-item" onclick="stopAndClean('${item.hash}', '${encodeURIComponent(item.name)}', '${encodeURIComponent(item.contentPath || '')}')">
-                      ✕ Cancelar y Borrar
+                    <button class="btn-stop-item" onclick="stopAndClean('${item.hash}', '${encodeURIComponent(item.name)}', '${encodeURIComponent(item.contentPath || '')}', ${item.progress >= 100})">
+                      ${item.progress >= 100 ? '🗑️ Borrar' : '✕ Cancelar y borrar'}
                     </button>
                   </div>
                 </div>
@@ -2438,11 +2438,11 @@
               </div>
             </div>
             <div class="dl-actions">
-              <button class="btn-stream-live" onclick="playStream('${encodeURIComponent(item.name)}', '${item.hash}', '${encodeURIComponent(item.contentPath || '')}')">
+              <button class="btn-stream-live" onclick="playStream('${encodeURIComponent(item.name)}', '${item.hash}', '${encodeURIComponent(item.contentPath || '')}', ${item.tmdbId || 'null'}, '${item.mediaType || 'movie'}')">
                 ▶ Ver en Vivo
               </button>
-              <button class="btn-stop-item" onclick="stopAndClean('${item.hash}', '${encodeURIComponent(item.name)}', '${encodeURIComponent(item.contentPath || '')}')">
-                ✕ Cancelar y Borrar
+              <button class="btn-stop-item" onclick="stopAndClean('${item.hash}', '${encodeURIComponent(item.name)}', '${encodeURIComponent(item.contentPath || '')}', ${item.progress >= 100})">
+                ${item.progress >= 100 ? '🗑️ Borrar' : '✕ Cancelar y borrar'}
               </button>
             </div>
           </div>
@@ -3701,7 +3701,13 @@
     function parseVttText(vttText) {
       if (!vttText || typeof vttText !== 'string') return [];
       const cues = [];
-      const timeRegex = /(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[.,](\d{3})/;
+      const timeRegex = /((?:\d{1,2}:)?\d{2}:\d{2}[.,]\d{3})\s*-->\s*((?:\d{1,2}:)?\d{2}:\d{2}[.,]\d{3})/;
+      function parseTs(t) {
+        const parts = t.trim().split(':');
+        if (parts.length === 3) return parseInt(parts[0], 10) * 3600 + parseInt(parts[1], 10) * 60 + parseFloat(parts[2].replace(',', '.'));
+        if (parts.length === 2) return parseInt(parts[0], 10) * 60 + parseFloat(parts[1].replace(',', '.'));
+        return 0;
+      }
       const blocks = vttText.split(/\r?\n\s*\r?\n/);
 
       for (let i = 0; i < blocks.length; i++) {
@@ -3709,8 +3715,8 @@
         if (!b) continue;
         const match = b.match(timeRegex);
         if (match) {
-          const start = parseInt(match[1], 10) * 3600 + parseInt(match[2], 10) * 60 + parseInt(match[3], 10) + parseInt(match[4], 10) / 1000;
-          const end = parseInt(match[5], 10) * 3600 + parseInt(match[6], 10) * 60 + parseInt(match[7], 10) + parseInt(match[8], 10) / 1000;
+          const start = parseTs(match[1]);
+          const end = parseTs(match[2]);
           const lines = b.split(/\r?\n/).filter(l => !l.includes('-->') && !/^\d+$/.test(l.trim())).join('\n');
           const text = lines.replace(/<[^>]+>/g, '').trim();
           if (text) {
@@ -4003,15 +4009,16 @@
       }
     }
 
-    async function stopAndClean(hash, name, contentPath) {
+    async function stopAndClean(hash, name, contentPath, isCompleted = false) {
       try {
-        showToast('Eliminando descarga y borrando archivo del disco...', '🧹');
+        const decodedName = decodeURIComponent(name);
+        showToast(isCompleted ? `Eliminando "${decodedName}" del disco...` : `Cancelando descarga de "${decodedName}" y borrando del disco...`, '🧹');
         await fetch('/api/stop-torrent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             hash,
-            name: decodeURIComponent(name),
+            name: decodedName,
             contentPath: contentPath ? decodeURIComponent(contentPath) : ''
           })
         });
@@ -4026,7 +4033,7 @@
         localStorage.setItem('cineflix_watch_history', JSON.stringify(watchHistory));
         renderContinueWatchingShelf();
 
-        showToast('¡Descarga cancelada y archivo borrado por completo!', '✅');
+        showToast(isCompleted ? '¡Película y archivos eliminados por completo del disco!' : '¡Descarga cancelada y archivo borrado por completo!', '✅');
         pollDownloads();
       } catch (e) {
         console.error('Error stopping:', e);
