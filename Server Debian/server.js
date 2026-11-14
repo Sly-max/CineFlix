@@ -150,7 +150,7 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
     }, postBody).catch(() => {});
   }
 
-  // 3. Remove from Sonarr / Radarr queues and PURGE from Radarr database
+  // 3. Remove from Sonarr / Radarr queues and PURGE from Radarr database (WITHOUT BLOCKLISTING!)
   try {
     const sQueue = await httpRequest({
       hostname: '127.0.0.1',
@@ -165,7 +165,7 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
           await httpRequest({
             hostname: '127.0.0.1',
             port: 8989,
-            path: `/api/v3/queue/${rec.id}?removeFromClient=true&blocklist=true`,
+            path: `/api/v3/queue/${rec.id}?removeFromClient=true&blocklist=false`,
             method: 'DELETE',
             headers: { 'X-Api-Key': SONARR_KEY }
           }).catch(() => {});
@@ -186,7 +186,31 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
           await httpRequest({
             hostname: '127.0.0.1',
             port: 7878,
-            path: `/api/v3/queue/${rec.id}?removeFromClient=true&blocklist=true`,
+            path: `/api/v3/queue/${rec.id}?removeFromClient=true&blocklist=false`,
+            method: 'DELETE',
+            headers: { 'X-Api-Key': RADARR_KEY }
+          }).catch(() => {});
+        }
+      }
+    }
+
+    // Purge any blocked records from Radarr blocklist matching this hash or name
+    const rBlock = await httpRequest({
+      hostname: '127.0.0.1',
+      port: 7878,
+      path: '/api/v3/blocklist',
+      method: 'GET',
+      headers: { 'X-Api-Key': RADARR_KEY }
+    });
+    if (rBlock.data && Array.isArray(rBlock.data.records)) {
+      for (const b of rBlock.data.records) {
+        const matchesHash = hash && b.sourceTitle && b.sourceTitle.toLowerCase().includes(hash.toLowerCase());
+        const matchesName = name && b.sourceTitle && b.sourceTitle.toLowerCase().includes((name || '').toLowerCase().substring(0, 15));
+        if (matchesHash || matchesName) {
+          await httpRequest({
+            hostname: '127.0.0.1',
+            port: 7878,
+            path: `/api/v3/blocklist/${b.id}`,
             method: 'DELETE',
             headers: { 'X-Api-Key': RADARR_KEY }
           }).catch(() => {});
@@ -254,6 +278,28 @@ async function deleteTorrentAndFiles(hash, name, contentPath) {
           try { fs.rmSync(path.join(TORRENTS_DIR, item), { recursive: true, force: true }); } catch (e) {}
         }
       }
+    }
+  } catch (e) {}
+
+  // 5. Invalidate searchCache & mediaProbeCache so next requests fetch cleanly
+  searchCache.clear();
+  for (const k of Object.keys(mediaProbeCache)) {
+    if ((name && k.toLowerCase().includes((name || '').toLowerCase().substring(0, 15))) || (realContentPath && k.includes(path.basename(realContentPath)))) {
+      delete mediaProbeCache[k];
+    }
+  }
+
+  // 6. Remove from server history.json
+  try {
+    if (fs.existsSync(HISTORY_FILE)) {
+      let hist = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8') || '[]');
+      hist = hist.filter(h => {
+        if (hash && h.hash && h.hash.toLowerCase() === hash.toLowerCase()) return false;
+        if (name && h.filename && h.filename.toLowerCase().includes((name || '').toLowerCase().substring(0, 15))) return false;
+        if (name && h.title && h.title.toLowerCase().includes((name || '').toLowerCase().substring(0, 15))) return false;
+        return true;
+      });
+      fs.writeFileSync(HISTORY_FILE, JSON.stringify(hist, null, 2), 'utf8');
     }
   } catch (e) {}
 }
@@ -1531,6 +1577,38 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
         if (!downloadUrl) throw new Error('Missing download url');
 
         const cookie = await getQbitCookie();
+
+        // Extract infoHash if available and purge any stale instance in qBittorrent before re-adding
+        let infoHash = null;
+        const hashMatch = downloadUrl.match(/xt=urn:btih:([a-zA-Z0-9]+)/i);
+        if (hashMatch) {
+          infoHash = hashMatch[1].toLowerCase();
+          try {
+            const checkRes = await httpRequest({
+              hostname: '127.0.0.1',
+              port: 8080,
+              path: '/api/v2/torrents/info?hashes=' + infoHash,
+              method: 'GET',
+              headers: { 'Cookie': cookie }
+            });
+            if (Array.isArray(checkRes.data) && checkRes.data.length > 0) {
+              const delBody = `hashes=${infoHash}&deleteFiles=true`;
+              await httpRequest({
+                hostname: '127.0.0.1',
+                port: 8080,
+                path: '/api/v2/torrents/delete',
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'Content-Length': Buffer.byteLength(delBody),
+                  'Cookie': cookie
+                }
+              }, delBody);
+              await new Promise(r => setTimeout(r, 250));
+            }
+          } catch(e) {}
+        }
+
         const postData = `urls=${encodeURIComponent(downloadUrl)}&savepath=${encodeURIComponent('/downloads')}&category=cineflix&sequentialDownload=true&firstLastPiecePrio=true`;
 
         await httpRequest({
@@ -1657,6 +1735,38 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
         }
 
         const cookie = await getQbitCookie();
+
+        // Extract infoHash if available and purge any stale instance in qBittorrent before re-adding
+        let infoHash = null;
+        const hashMatch = bestRelease.downloadUrl.match(/xt=urn:btih:([a-zA-Z0-9]+)/i);
+        if (hashMatch) {
+          infoHash = hashMatch[1].toLowerCase();
+          try {
+            const checkRes = await httpRequest({
+              hostname: '127.0.0.1',
+              port: 8080,
+              path: '/api/v2/torrents/info?hashes=' + infoHash,
+              method: 'GET',
+              headers: { 'Cookie': cookie }
+            });
+            if (Array.isArray(checkRes.data) && checkRes.data.length > 0) {
+              const delBody = `hashes=${infoHash}&deleteFiles=true`;
+              await httpRequest({
+                hostname: '127.0.0.1',
+                port: 8080,
+                path: '/api/v2/torrents/delete',
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'Content-Length': Buffer.byteLength(delBody),
+                  'Cookie': cookie
+                }
+              }, delBody);
+              await new Promise(r => setTimeout(r, 250));
+            }
+          } catch(e) {}
+        }
+
         const postData = `urls=${encodeURIComponent(bestRelease.downloadUrl)}&savepath=${encodeURIComponent('/downloads')}&category=cineflix&sequentialDownload=true&firstLastPiecePrio=true`;
 
         await httpRequest({
@@ -1768,6 +1878,27 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
           } catch (e) {}
         }
       }
+
+      // Invalidate memory caches and history
+      searchCache.clear();
+      for (const k of Object.keys(mediaProbeCache)) delete mediaProbeCache[k];
+      try { if (fs.existsSync(HISTORY_FILE)) fs.writeFileSync(HISTORY_FILE, '[]', 'utf8'); } catch(e) {}
+
+      // Clean Radarr & Sonarr queues without blocklisting
+      try {
+        const rQueue = await httpRequest({ hostname: '127.0.0.1', port: 7878, path: '/api/v3/queue', method: 'GET', headers: { 'X-Api-Key': RADARR_KEY } });
+        if (rQueue.data && Array.isArray(rQueue.data.records)) {
+          for (const rec of rQueue.data.records) {
+            await httpRequest({ hostname: '127.0.0.1', port: 7878, path: `/api/v3/queue/${rec.id}?removeFromClient=true&blocklist=false`, method: 'DELETE', headers: { 'X-Api-Key': RADARR_KEY } }).catch(() => {});
+          }
+        }
+        const sQueue = await httpRequest({ hostname: '127.0.0.1', port: 8989, path: '/api/v3/queue', method: 'GET', headers: { 'X-Api-Key': SONARR_KEY } });
+        if (sQueue.data && Array.isArray(sQueue.data.records)) {
+          for (const rec of sQueue.data.records) {
+            await httpRequest({ hostname: '127.0.0.1', port: 8989, path: `/api/v3/queue/${rec.id}?removeFromClient=true&blocklist=false`, method: 'DELETE', headers: { 'X-Api-Key': SONARR_KEY } }).catch(() => {});
+          }
+        }
+      } catch (e) {}
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ ok: true, message: '¡Caché y descargas temporales eliminadas por completo! Espacio en disco 100% liberado.' }));
