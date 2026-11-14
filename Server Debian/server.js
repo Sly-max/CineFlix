@@ -1049,12 +1049,16 @@ async function searchReleases(title, year, mediaType = 'movie', season = null, t
       }
       if (!dlUrl) continue;
 
+      const verifiedIndexers = ['torrentio', 'cinecalidad', '1337x', 'thepiratebay', 'piratebay', 'torrentgalaxy', 'limetorrents', 'yts', 'eztv'];
+      const isVerifiedIndexer = verifiedIndexers.some(vi => (r.indexer || '').toLowerCase().includes(vi));
+
       allReleases.push({
         title: r.title,
         size: (r.size / 1024 / 1024 / 1024).toFixed(2) + ' GB',
         sizeBytes: r.size,
         seeders: r.seeders || 0,
         indexer: r.indexer,
+        isVerifiedIndexer,
         downloadUrl: dlUrl,
         infoHash: hashId,
         ...meta
@@ -1066,6 +1070,7 @@ async function searchReleases(title, year, mediaType = 'movie', season = null, t
   // 1) Digital Original ALWAYS before CAM
   // 2) Season match boost if requested (for TV shows)
   // 3) Spanish / Multi audio first (Español Latino o Multi-Audio)
+  // 3b) Verified indexers boost (reliable seeds vs stale dead scrapers)
   // 4) Seeders DESC (más semillas = descarga más rápida)
   // 5) Quality Rank (1080p / 4K)
   allReleases.sort((a, b) => {
@@ -1086,6 +1091,14 @@ async function searchReleases(title, year, mediaType = 'movie', season = null, t
     const spaB = (b.isSpanishAvailable || b.isLatino || b.isCastellano) ? 1 : 0;
     if (spaA !== spaB) return spaB - spaA;
 
+    // 3b. Prioritize verified indexers when healthy
+    const verA = a.isVerifiedIndexer ? 1 : 0;
+    const verB = b.isVerifiedIndexer ? 1 : 0;
+    if (verA !== verB) {
+      if (verA && a.seeders >= 8) return -1;
+      if (verB && b.seeders >= 8) return 1;
+    }
+
     // 4. Seeders DESC (máxima velocidad primero)
     if (b.seeders !== a.seeders) return b.seeders - a.seeders;
 
@@ -1104,6 +1117,47 @@ function srtToVtt(srtContent) {
     .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
 }
 
+function isSpanishText(text) {
+  if (!text || typeof text !== 'string') return false;
+  const clean = text.replace(/\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}/g, '')
+                    .replace(/<[^>]+>/g, '')
+                    .replace(/^\d+$/gm, '')
+                    .toLowerCase();
+
+  const spanishMatches = (clean.match(/\b(que|de|no|la|el|es|en|por|un|con|una|los|se|te|al|está|cómo|más|pero|para|este|bien|todo|aquí|gracias|bueno|hacer|tiempo|nada|ahora|algo|estoy|hola|amigo|señor|esto|sobre|tiene|todos|puede|donde|sí|muy|él|ella|nos|yo|mi|tu|su|ya|fue|estás|vamos|estaba|casa|vida|mundo|padre|madre|hombre|mujer|hijo|hija|noche|día|años|vez|dios|verdad|creo|saber|decir|ver|ir|dar|hablar|pasar|debe|deja|quiero|sabes|tienes|hace|dijo|parece|siento|espera|seguro|favor)\b/g) || []).length;
+  const spanishChars = (clean.match(/[áéíóúñ¿¡]/g) || []).length;
+  const totalSpanishScore = spanishMatches + (spanishChars * 3);
+
+  const englishMatches = (clean.match(/\b(the|and|that|have|for|not|with|you|this|but|his|from|they|say|her|she|will|one|all|would|there|their|what|out|about|who|get|which|when|make|can|like|time|just|him|know|take|people|into|year|your|good|some|could|them|see|other|than|then|now|look|only|come|its|over|think|also|back|after|use|two|how|our|work|first|well|way|even|new|want|because|any|these|give|day|most|us|yeah|okay|hey|gonna|wanna|gotta)\b/g) || []).length;
+
+  return totalSpanishScore >= 12 && (totalSpanishScore >= englishMatches * 0.7);
+}
+
+const standardTrackers = [
+  'udp://tracker.opentrackr.org:1337/announce',
+  'udp://open.demonii.com:1337/announce',
+  'udp://open.stealth.si:80/announce',
+  'udp://tracker.torrent.eu.org:451/announce',
+  'udp://tracker.bittor.pw:1337/announce',
+  'udp://public.popcorn-tracker.org:6969/announce',
+  'udp://tracker.openbittorrent.com:6969/announce',
+  'udp://explodie.org:6969/announce',
+  'udp://exodus.desync.com:6969/announce',
+  'udp://tracker.coppersurfer.tk:6969/announce'
+];
+
+function injectStandardTrackers(magnetUrl) {
+  if (!magnetUrl || !magnetUrl.startsWith('magnet:')) return magnetUrl;
+  let res = magnetUrl;
+  for (const tr of standardTrackers) {
+    const enc = encodeURIComponent(tr);
+    if (!res.includes(enc) && !res.includes(tr)) {
+      res += '&tr=' + enc;
+    }
+  }
+  return res;
+}
+
 async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
   if (!filePath || !fs.existsSync(filePath)) {
     return 'WEBVTT\n\n';
@@ -1112,12 +1166,12 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
   const cachedVttPath = `${filePath}.es.vtt`;
   const embeddedVttPath = `${filePath}.embedded.es.vtt`;
 
-  // 1. Check if cached embedded dialogue subtitle already exists (0ms instant response)
+  // 1. Check if cached embedded dialogue subtitle already exists and is authentic Spanish (0ms instant response)
   if (fs.existsSync(embeddedVttPath)) {
     try {
       const existing = fs.readFileSync(embeddedVttPath, 'utf8');
       const cueMatches = (existing.match(/-->/g) || []).length;
-      if (cueMatches >= 50) {
+      if (cueMatches >= 50 && isSpanishText(existing)) {
         return existing;
       }
     } catch (e) {}
@@ -1176,14 +1230,14 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
         const vtt = await extractStreamVtt(cand.index);
         if (vtt) {
           const cues = (vtt.match(/-->/g) || []).length;
-          if (cues >= 50) {
+          if (cues >= 50 && isSpanishText(vtt)) {
             // Found full dialogue track! Save to embedded cache & standard cache and return immediately
             try {
               fs.writeFileSync(embeddedVttPath, vtt, 'utf8');
               fs.writeFileSync(cachedVttPath, vtt, 'utf8');
             } catch(e) {}
             return vtt;
-          } else if (cues > 0 && !forcedFallbackVtt) {
+          } else if (cues > 0 && !forcedFallbackVtt && isSpanishText(vtt)) {
             forcedFallbackVtt = vtt;
           }
         }
@@ -1193,18 +1247,22 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
     console.error('Error probing embedded subtitles:', e.message);
   }
 
-  // 3. If no embedded subtitles in container, check if a verified cached .es.vtt exists on disk
+  // 3. If no embedded subtitles in container, check if a verified cached .es.vtt exists on disk and is Spanish
   if (fs.existsSync(cachedVttPath)) {
     try {
       const existing = fs.readFileSync(cachedVttPath, 'utf8');
       const cueMatches = (existing.match(/-->/g) || []).length;
-      if (cueMatches >= 50) {
+      if (cueMatches >= 30 && isSpanishText(existing)) {
         return existing;
+      } else {
+        // Stale or non-Spanish cached file - remove it immediately
+        try { fs.unlinkSync(cachedVttPath); } catch(e) {}
       }
     } catch (e) {}
   }
 
   // 3. Check if release came with verified external subtitle files in directory (e.g. Subs/Spanish.srt)
+  // Strictly verify dialogue language is SPANISH (rejects bundled English .srt from YTS/RARBG releases)
   const dir = path.dirname(filePath);
   const baseName = path.basename(filePath, path.extname(filePath));
   const candidateSubs = [
@@ -1223,7 +1281,7 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
       try {
         const content = fs.readFileSync(c, 'utf8');
         const cues = (content.match(/-->/g) || []).length;
-        if (cues >= 50) {
+        if (cues >= 50 && isSpanishText(content)) {
           const vtt = srtToVtt(content);
           try { fs.writeFileSync(cachedVttPath, vtt, 'utf8'); } catch (e) {}
           return vtt;
@@ -1339,23 +1397,24 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
           return scoreB - scoreA;
         });
 
-        const bestSub = spanishSubs[0];
-        const srtContent = await new Promise((resolve) => {
-          const req = https.get(bestSub.url, { timeout: 5000 }, r => {
-            let d = '';
-            r.on('data', c => d += c);
-            r.on('end', () => resolve(d));
+        for (const candidate of spanishSubs.slice(0, 4)) {
+          const srtContent = await new Promise((resolve) => {
+            const req = https.get(candidate.url, { timeout: 5000 }, r => {
+              let d = '';
+              r.on('data', c => d += c);
+              r.on('end', () => resolve(d));
+            });
+            req.on('error', () => resolve(''));
+            req.on('timeout', () => { req.destroy(); resolve(''); });
           });
-          req.on('error', () => resolve(''));
-          req.on('timeout', () => { req.destroy(); resolve(''); });
-        });
 
-        if (srtContent && srtContent.length > 100) {
-          const vtt = srtToVtt(srtContent);
-          const cues = (vtt.match(/-->/g) || []).length;
-          if (cues >= 30) {
-            try { fs.writeFileSync(cachedVttPath, vtt, 'utf8'); } catch (e) {}
-            return vtt;
+          if (srtContent && srtContent.length > 100) {
+            const vtt = srtToVtt(srtContent);
+            const cues = (vtt.match(/-->/g) || []).length;
+            if (cues >= 30 && isSpanishText(vtt)) {
+              try { fs.writeFileSync(cachedVttPath, vtt, 'utf8'); } catch (e) {}
+              return vtt;
+            }
           }
         }
       }
@@ -1842,6 +1901,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
           } catch(e) {}
         }
 
+        downloadUrl = injectStandardTrackers(downloadUrl);
         const postData = `urls=${encodeURIComponent(downloadUrl)}&savepath=${encodeURIComponent('/downloads')}&category=cineflix&sequentialDownload=true&firstLastPiecePrio=true`;
 
         if (infoHash) {
@@ -1859,6 +1919,22 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
             'Cookie': cookie
           }
         }, postData);
+
+        // Inject high performance trackers directly into the active torrent
+        if (infoHash) {
+          const addTrData = `hash=${infoHash}&urls=${encodeURIComponent(standardTrackers.join('\n'))}`;
+          httpRequest({
+            hostname: '127.0.0.1',
+            port: 8080,
+            path: '/api/v2/torrents/addTrackers',
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Content-Length': Buffer.byteLength(addTrData),
+              'Cookie': cookie
+            }
+          }, addTrData).catch(() => {});
+        }
 
         // Optimize torrent pieces for instant sequential streaming
         setTimeout(async () => {
@@ -2007,6 +2083,7 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
           } catch(e) {}
         }
 
+        downloadUrl = injectStandardTrackers(downloadUrl);
         const postData = `urls=${encodeURIComponent(downloadUrl)}&savepath=${encodeURIComponent('/downloads')}&category=cineflix&sequentialDownload=true&firstLastPiecePrio=true`;
 
         if (infoHash) {
@@ -2024,6 +2101,22 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
             'Cookie': cookie
           }
         }, postData);
+
+        // Inject high performance trackers directly into the active torrent
+        if (infoHash) {
+          const addTrData = `hash=${infoHash}&urls=${encodeURIComponent(standardTrackers.join('\n'))}`;
+          httpRequest({
+            hostname: '127.0.0.1',
+            port: 8080,
+            path: '/api/v2/torrents/addTrackers',
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Content-Length': Buffer.byteLength(addTrData),
+              'Cookie': cookie
+            }
+          }, addTrData).catch(() => {});
+        }
 
         const langBadge = bestRelease.isLatino ? '🇲🇽 Español Latino' : '💎 Idioma Original';
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -2066,11 +2159,21 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
       }
 
       const formatted = list.map(t => {
-        const parsed = parseTorrentName(t.name, t.category);
         const meta = torrentMetadata.get((t.hash || '').toLowerCase()) || {};
+        let displayName = t.name;
+        if ((!displayName || /^[a-f0-9]{40}$/i.test(displayName) || t.state === 'metaDL') && meta.title) {
+          displayName = meta.title;
+        }
+        const parsed = parseTorrentName(displayName, t.category);
+        let displayState = t.state;
+        if (t.state === 'metaDL') {
+          displayState = '⏳ Conectando con semillas / Obteniendo metadatos...';
+        } else if (t.state === 'stalledDL') {
+          displayState = 'Buscando pares activos...';
+        }
         return {
           hash: t.hash,
-          name: t.name,
+          name: displayName,
           contentPath: t.content_path,
           isTv: parsed.isTv,
           seriesName: parsed.seriesName,
@@ -2084,10 +2187,10 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
           dlspeed: t.dlspeed,
           speed: (t.dlspeed / 1024 / 1024).toFixed(1) + ' MB/s',
           size: (t.size / 1024 / 1024 / 1024).toFixed(2) + ' GB',
-          state: t.state,
+          state: displayState,
           sequential: t.seq_dl,
           streamable: t.progress > 0.01 || t.dlspeed > 500000,
-          eta: t.eta > 0 && t.eta < 86400 ? Math.round(t.eta / 60) + ' min' : (t.progress === 1 ? 'Completo' : 'Calculando...')
+          eta: t.eta > 0 && t.eta < 86400 ? Math.round(t.eta / 60) + ' min' : (t.progress === 1 ? 'Completo' : (t.state === 'metaDL' ? 'Conectando...' : 'Calculando...'))
         };
       });
 

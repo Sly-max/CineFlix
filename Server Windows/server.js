@@ -298,9 +298,35 @@ async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null)
 // -------------------------------------------------------------------------
 // Standalone BitTorrent Engine (Powered by torrent-stream)
 // -------------------------------------------------------------------------
+const standardTrackers = [
+  'udp://tracker.opentrackr.org:1337/announce',
+  'udp://open.demonii.com:1337/announce',
+  'udp://open.stealth.si:80/announce',
+  'udp://tracker.torrent.eu.org:451/announce',
+  'udp://tracker.bittor.pw:1337/announce',
+  'udp://public.popcorn-tracker.org:6969/announce',
+  'udp://tracker.openbittorrent.com:6969/announce',
+  'udp://explodie.org:6969/announce',
+  'udp://exodus.desync.com:6969/announce',
+  'udp://tracker.coppersurfer.tk:6969/announce'
+];
+
+function injectStandardTrackers(magnetUrl) {
+  if (!magnetUrl || !magnetUrl.startsWith('magnet:')) return magnetUrl;
+  let res = magnetUrl;
+  for (const tr of standardTrackers) {
+    const enc = encodeURIComponent(tr);
+    if (!res.includes(enc) && !res.includes(tr)) {
+      res += '&tr=' + enc;
+    }
+  }
+  return res;
+}
+
 const activeTorrentEngines = new Map();
 
 function startTorrentEngine(magnetUrl, title = '') {
+  magnetUrl = injectStandardTrackers(magnetUrl);
   let hashMatch = magnetUrl.match(/xt=urn:btih:([a-zA-Z0-9]+)/i);
   let hash = hashMatch ? hashMatch[1].toLowerCase() : `t_${Date.now()}`;
 
@@ -315,8 +341,9 @@ function startTorrentEngine(magnetUrl, title = '') {
 
   const engine = torrentStream(magnetUrl, {
     path: TORRENTS_DIR,
-    connections: 50,
-    uploads: 2
+    connections: 60,
+    uploads: 2,
+    trackers: standardTrackers
   });
 
   engine.infoHash = hash;
@@ -981,6 +1008,22 @@ async function handleRequest(req, res) {
     return res.end(JSON.stringify({ ...info, ready: info.duration > 0 }));
   }
 
+function isSpanishText(text) {
+  if (!text || typeof text !== 'string') return false;
+  const clean = text.replace(/\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}/g, '')
+                    .replace(/<[^>]+>/g, '')
+                    .replace(/^\d+$/gm, '')
+                    .toLowerCase();
+
+  const spanishMatches = (clean.match(/\b(que|de|no|la|el|es|en|por|un|con|una|los|se|te|al|está|cómo|más|pero|para|este|bien|todo|aquí|gracias|bueno|hacer|tiempo|nada|ahora|algo|estoy|hola|amigo|señor|esto|sobre|tiene|todos|puede|donde|sí|muy|él|ella|nos|yo|mi|tu|su|ya|fue|estás|vamos|estaba|casa|vida|mundo|padre|madre|hombre|mujer|hijo|hija|noche|día|años|vez|dios|verdad|creo|saber|decir|ver|ir|dar|hablar|pasar|debe|deja|quiero|sabes|tienes|hace|dijo|parece|siento|espera|seguro|favor)\b/g) || []).length;
+  const spanishChars = (clean.match(/[áéíóúñ¿¡]/g) || []).length;
+  const totalSpanishScore = spanishMatches + (spanishChars * 3);
+
+  const englishMatches = (clean.match(/\b(the|and|that|have|for|not|with|you|this|but|his|from|they|say|her|she|will|one|all|would|there|their|what|out|about|who|get|which|when|make|can|like|time|just|him|know|take|people|into|year|your|good|some|could|them|see|other|than|then|now|look|only|come|its|over|think|also|back|after|use|two|how|our|work|first|well|way|even|new|want|because|any|these|give|day|most|us|yeah|okay|hey|gonna|wanna|gotta)\b/g) || []).length;
+
+  return totalSpanishScore >= 12 && (totalSpanishScore >= englishMatches * 0.7);
+}
+
 function srtToVtt(srtContent) {
   return 'WEBVTT\n\n' + (srtContent || '')
     .replace(/\r\n/g, '\n')
@@ -996,12 +1039,12 @@ async function getOrFetchSpanishSubtitles(filePath, query = {}) {
   const cachedVttPath = `${filePath}.es.vtt`;
   const embeddedVttPath = `${filePath}.embedded.es.vtt`;
 
-  // 1. Check if cached embedded dialogue subtitle already exists (0ms instant response)
+  // 1. Check if cached embedded dialogue subtitle already exists and is authentic Spanish (0ms instant response)
   if (fs.existsSync(embeddedVttPath)) {
     try {
       const existing = fs.readFileSync(embeddedVttPath, 'utf8');
       const cueMatches = (existing.match(/-->/g) || []).length;
-      if (cueMatches >= 50) {
+      if (cueMatches >= 50 && isSpanishText(existing)) {
         return existing;
       }
     } catch (e) {}
@@ -1059,13 +1102,13 @@ async function getOrFetchSpanishSubtitles(filePath, query = {}) {
         const vtt = await extractStreamVtt(cand.index);
         if (vtt) {
           const cues = (vtt.match(/-->/g) || []).length;
-          if (cues >= 50) {
+          if (cues >= 50 && isSpanishText(vtt)) {
             try {
               fs.writeFileSync(embeddedVttPath, vtt, 'utf8');
               fs.writeFileSync(cachedVttPath, vtt, 'utf8');
             } catch (e) {}
             return vtt;
-          } else if (cues > 0 && !forcedFallbackVtt) {
+          } else if (cues > 0 && !forcedFallbackVtt && isSpanishText(vtt)) {
             forcedFallbackVtt = vtt;
           }
         }
@@ -1078,13 +1121,16 @@ async function getOrFetchSpanishSubtitles(filePath, query = {}) {
     try {
       const existing = fs.readFileSync(cachedVttPath, 'utf8');
       const cueMatches = (existing.match(/-->/g) || []).length;
-      if (cueMatches >= 50) {
+      if (cueMatches >= 30 && isSpanishText(existing)) {
         return existing;
+      } else {
+        try { fs.unlinkSync(cachedVttPath); } catch(e) {}
       }
     } catch (e) {}
   }
 
-  // 3. Local directory subtitle files (Subs/Spanish.srt, etc.)
+  // 3b. Local directory subtitle files (Subs/Spanish.srt, etc.)
+  // Strictly verify dialogue language is SPANISH (rejects bundled English .srt from YTS/RARBG releases)
   const dir = path.dirname(filePath);
   const baseName = path.basename(filePath, path.extname(filePath));
   const candidateSubs = [
@@ -1103,7 +1149,7 @@ async function getOrFetchSpanishSubtitles(filePath, query = {}) {
       try {
         const content = fs.readFileSync(c, 'utf8');
         const cues = (content.match(/-->/g) || []).length;
-        if (cues >= 50) {
+        if (cues >= 50 && isSpanishText(content)) {
           const vtt = srtToVtt(content);
           try { fs.writeFileSync(cachedVttPath, vtt, 'utf8'); } catch (e) {}
           return vtt;
@@ -1191,30 +1237,31 @@ async function getOrFetchSpanishSubtitles(filePath, query = {}) {
           return scoreB - scoreA;
         });
 
-        const bestSub = spanishSubs[0];
-        const srtContent = await new Promise((res) => {
-          const req = https.get(bestSub.url, { timeout: 5000 }, r => {
-            let d = '';
-            r.on('data', chunk => d += chunk);
-            r.on('end', () => res(d));
+        for (const candidate of spanishSubs.slice(0, 4)) {
+          const srtContent = await new Promise((res) => {
+            const req = https.get(candidate.url, { timeout: 5000 }, r => {
+              let d = '';
+              r.on('data', chunk => d += chunk);
+              r.on('end', () => res(d));
+            });
+            req.on('error', () => res(''));
+            req.on('timeout', () => { req.destroy(); res(''); });
           });
-          req.on('error', () => res(''));
-          req.on('timeout', () => { req.destroy(); res(''); });
-        });
 
-        if (srtContent && srtContent.length > 100) {
-          const vtt = srtToVtt(srtContent);
-          const cues = (vtt.match(/-->/g) || []).length;
-          if (cues >= 30) {
-            try { fs.writeFileSync(cachedVttPath, vtt, 'utf8'); } catch (e) {}
-            return vtt;
+          if (srtContent && srtContent.length > 100) {
+            const vtt = srtToVtt(srtContent);
+            const cues = (vtt.match(/-->/g) || []).length;
+            if (cues >= 30 && isSpanishText(vtt)) {
+              try { fs.writeFileSync(cachedVttPath, vtt, 'utf8'); } catch (e) {}
+              return vtt;
+            }
           }
         }
       }
     }
   } catch (e) {}
 
-  if (forcedFallbackVtt) {
+  if (forcedFallbackVtt && isSpanishText(forcedFallbackVtt)) {
     try { fs.writeFileSync(cachedVttPath, forcedFallbackVtt, 'utf8'); } catch (e) {}
     return forcedFallbackVtt;
   }

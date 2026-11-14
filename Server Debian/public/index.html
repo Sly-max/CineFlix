@@ -1623,7 +1623,7 @@
         <div class="quick-tags" style="margin-bottom: 12px; flex-wrap: wrap;">
           <button id="tabSpanish" class="quick-tag active" onclick="filterReleases('spanish')">🇪🇸 Español (Latino y Castellano) (<span id="countSpanish">0</span>)</button>
           <button id="tabDigital" class="quick-tag" onclick="filterReleases('digital')">💎 Digital (+Rápidas) (<span id="countDigital">0</span>)</button>
-          <button id="tabOriginal" class="quick-tag" onclick="filterReleases('original')">💎 Idioma Original + Subs (<span id="countOriginal">0</span>)</button>
+          <button id="tabOriginal" class="quick-tag" onclick="filterReleases('original')">💎 Idioma Original + Sub Español (<span id="countOriginal">0</span>)</button>
           <button id="tabMulti" class="quick-tag" onclick="filterReleases('multi')">🌐 Multi / Internacional (<span id="countMulti">0</span>)</button>
           <button id="tabCam" class="quick-tag" onclick="filterReleases('cam')">🎥 Grabadas de Cine (<span id="countCam">0</span>)</button>
           <button id="tabAll" class="quick-tag" onclick="filterReleases('all')">⭐ Todas (<span id="countAll">0</span>)</button>
@@ -2872,7 +2872,7 @@
         filtered = filtered.filter(isSpa);
         const hasDigital = filtered.some(r => !r.isCam);
         if (!hasDigital && filtered.length > 0) {
-          extraNotice = '<div style="background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; font-size: 0.82rem; color: #fbbf24;">⚠️ <strong>Aviso de Estreno:</strong> Esta película aún está en cartelera. La única versión en español existente fue grabada de sala de cine (CAM). Para ver en 1080p nítido, te sugerimos la pestaña <strong>💎 Idioma Original + Subs</strong>.</div>';
+          extraNotice = '<div style="background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; font-size: 0.82rem; color: #fbbf24;">⚠️ <strong>Aviso de Estreno:</strong> Esta película aún está en cartelera. La única versión en español existente fue grabada de sala de cine (CAM). Para ver en 1080p nítido, te sugerimos la pestaña <strong>💎 Idioma Original + Sub Español</strong>.</div>';
         }
       } else if (currentReleaseFilter === 'digital') {
         filtered = filtered.filter(r => !r.isCam);
@@ -2934,7 +2934,7 @@
         } else if (r.isMulti) {
           langBadge = `<span class="badge-lang" style="background: rgba(56, 189, 248, 0.2); color: #38bdf8; font-weight: 700; border: 1px solid rgba(56, 189, 248, 0.4); padding: 3px 8px; border-radius: 6px; font-size: 0.75rem;">🌐 Multi-Audio</span>`;
         } else {
-          langBadge = `<span class="badge-lang" style="background: rgba(59, 130, 246, 0.15); color: #93c5fd; font-weight: 600; border: 1px solid rgba(59, 130, 246, 0.3); padding: 3px 8px; border-radius: 6px; font-size: 0.75rem;">💎 Idioma Original + Subs</span>`;
+          langBadge = `<span class="badge-lang" style="background: rgba(59, 130, 246, 0.15); color: #93c5fd; font-weight: 600; border: 1px solid rgba(59, 130, 246, 0.3); padding: 3px 8px; border-radius: 6px; font-size: 0.75rem;">💎 Idioma Original + Sub Español</span>`;
         }
 
         let qualityBadge = `<span class="badge-quality" style="background: rgba(255, 255, 255, 0.08); color: #e4e4e7; font-weight: 700; border: 1px solid rgba(255, 255, 255, 0.15); padding: 3px 8px; border-radius: 6px; font-size: 0.75rem;">${r.quality}</span>`;
@@ -3567,6 +3567,11 @@
 
       video.src = streamUrl;
       video.load();
+      try {
+        for (let i = 0; i < video.textTracks.length; i++) {
+          video.textTracks[i].mode = 'disabled';
+        }
+      } catch (e) {}
       video.volume = isPlayerMuted ? 0 : playerVolumeLevel;
       video.muted = isPlayerMuted;
       updateVolumeUI();
@@ -3609,6 +3614,11 @@
       };
 
       video.onloadedmetadata = () => {
+        try {
+          for (let i = 0; i < video.textTracks.length; i++) {
+            video.textTracks[i].mode = 'disabled';
+          }
+        } catch (e) {}
         if (video.duration && video.duration > 0 && (!mediaTotalDuration || mediaTotalDuration <= 0)) {
           mediaTotalDuration = video.duration;
           const slider = document.getElementById('playerSlider');
