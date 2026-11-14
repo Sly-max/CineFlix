@@ -1,0 +1,16 @@
+{
+  "name": "cineflix-debian",
+  "version": "1.0.0",
+  "description": "CineFlix Portal & Media Center - Debian Edition",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "cineflix",
+    "streaming",
+    "media-center"
+  ],
+  "author": "Sly-max",
+  "license": "MIT"
+}

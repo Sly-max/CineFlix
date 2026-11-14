@@ -1,0 +1,104 @@
+services:
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:latest
+    container_name: jellyfin
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=America/Argentina/Buenos_Aires
+    volumes:
+      - /opt/cine/config/jellyfin:/config
+      - /opt/cine/data/media/tv:/data/tvshows
+      - /opt/cine/data/media/movies:/data/movies
+      - /opt/cine/data/torrents:/data/torrents
+    ports:
+      - 8096:8096
+    restart: unless-stopped
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=America/Argentina/Buenos_Aires
+    volumes:
+      - /opt/cine/config/sonarr:/config
+      - /opt/cine/data/media/tv:/tv
+      - /opt/cine/data/torrents:/downloads
+    ports:
+      - 8989:8989
+    restart: unless-stopped
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=America/Argentina/Buenos_Aires
+    volumes:
+      - /opt/cine/config/radarr:/config
+      - /opt/cine/data/media/movies:/movies
+      - /opt/cine/data/torrents:/downloads
+    ports:
+      - 7878:7878
+    restart: unless-stopped
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=America/Argentina/Buenos_Aires
+    volumes:
+      - /opt/cine/config/prowlarr:/config
+    ports:
+      - 9696:9696
+    restart: unless-stopped
+
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=America/Argentina/Buenos_Aires
+    volumes:
+      - /opt/cine/config/bazarr:/config
+      - /opt/cine/data/media/movies:/movies
+      - /opt/cine/data/media/tv:/tv
+    ports:
+      - 6767:6767
+    restart: unless-stopped
+
+  jellyseerr:
+    image: fallenbagel/jellyseerr:latest
+    container_name: jellyseerr
+    environment:
+      - LOG_LEVEL=debug
+      - TZ=America/Argentina/Buenos_Aires
+    volumes:
+      - /opt/cine/config/jellyseerr:/app/config
+    ports:
+      - 5055:5055
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=America/Argentina/Buenos_Aires
+      - WEBUI_PORT=8080
+    volumes:
+      - /opt/cine/config/qbittorrent:/config
+      - /opt/cine/data/torrents:/downloads
+    ports:
+      - 8080:8080
+      - 6881:6881
+      - 6881:6881/udp
+    restart: unless-stopped
+

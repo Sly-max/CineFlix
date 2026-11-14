@@ -1,0 +1,17 @@
+{
+  "name": "cineflix-windows",
+  "version": "1.0.0",
+  "description": "CineFlix Portal & Media Center - Windows Edition",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "cineflix",
+    "windows",
+    "streaming",
+    "media-center"
+  ],
+  "author": "Sly-max",
+  "license": "MIT"
+}

@@ -1,0 +1,14 @@
+[Unit]
+Description=CineFlix Portal
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/cine/portal
+ExecStart=/usr/local/bin/node /opt/cine/portal/server.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
