@@ -508,17 +508,22 @@ function probeMedia(filePath) {
         }
         const preferredAudioIndex = preferredAudio ? preferredAudio.index : (audioTracks[0] ? audioTracks[0].index : null);
 
-        // Find spanish subtitle stream (prefer text subtitle formats like srt, subrip, ass, webvtt)
-        const spaSub = subs.find(s => {
-          const lang = s.tags && s.tags.language ? s.tags.language.toLowerCase() : '';
-          const title = s.tags && s.tags.title ? s.tags.title.toLowerCase() : '';
-          return lang.startsWith('spa') || lang.startsWith('es') || title.includes('spanish') || title.includes('español') || title.includes('castellano') || title.includes('latino');
+        // Collect all spanish subtitle streams
+        const spaSubs = subs.filter(s => {
+          const lang = (s.tags?.language || '').toLowerCase();
+          const title = (s.tags?.title || '').toLowerCase();
+          const isSpa = lang.startsWith('spa') || lang.startsWith('es') || title.includes('spanish') || title.includes('español') || title.includes('castellano') || title.includes('latino');
+          const isText = ['subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text'].includes((s.codec_name || '').toLowerCase());
+          return isSpa && isText;
         });
 
-        let spanishSubIndex = null;
-        if (spaSub && ['subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text'].includes((spaSub.codec_name || '').toLowerCase())) {
-          spanishSubIndex = spaSub.index;
+        let bestSpaSub = spaSubs.find(s => /latino|latin|mex|419/i.test(s.tags?.title || ''));
+        if (!bestSpaSub && spaSubs.length > 1) {
+          bestSpaSub = spaSubs.find(s => s.disposition && s.disposition.forced === 0 && spaSubs.indexOf(s) > 0) || spaSubs[spaSubs.length - 1];
         }
+        if (!bestSpaSub) bestSpaSub = spaSubs[0];
+
+        const spanishSubIndex = bestSpaSub ? bestSpaSub.index : null;
 
         const res = {
           duration,
@@ -528,7 +533,13 @@ function probeMedia(filePath) {
           audioTracks,
           preferredAudioIndex,
           spanishSubIndex,
-          allSubs: subs.map(s => ({ index: s.index, lang: s.tags?.language || 'und' }))
+          allSubs: subs.map(s => ({
+            index: s.index,
+            codec: (s.codec_name || '').toLowerCase(),
+            lang: (s.tags?.language || 'und').toLowerCase(),
+            title: (s.tags?.title || '').toLowerCase(),
+            forced: s.disposition ? s.disposition.forced === 1 : false
+          }))
         };
         if (duration > 0 && audioTracks.length > 0) {
           mediaProbeCache[filePath] = res;
@@ -1098,76 +1109,130 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
     return 'WEBVTT\n\n';
   }
 
-  // 1. Check if an external .vtt or .srt already exists on disk
+  const cachedVttPath = `${filePath}.es.vtt`;
+  const embeddedVttPath = `${filePath}.embedded.es.vtt`;
+
+  // 1. Check if cached embedded dialogue subtitle already exists (0ms instant response)
+  if (fs.existsSync(embeddedVttPath)) {
+    try {
+      const existing = fs.readFileSync(embeddedVttPath, 'utf8');
+      const cueMatches = (existing.match(/-->/g) || []).length;
+      if (cueMatches >= 50) {
+        return existing;
+      }
+    } catch (e) {}
+  }
+
+  const extractStreamVtt = (streamIndex) => new Promise((resolve) => {
+    const { spawn } = require('child_process');
+    const ff = spawn('ffmpeg', [
+      '-v', 'error',
+      '-i', filePath,
+      '-map', '0:' + streamIndex,
+      '-f', 'webvtt',
+      'pipe:1'
+    ]);
+    let out = '';
+    const timer = setTimeout(() => {
+      try { ff.kill('SIGKILL'); } catch (e) {}
+      resolve(null);
+    }, 6000);
+
+    ff.stdout.on('data', d => out += d);
+    ff.on('close', code => {
+      clearTimeout(timer);
+      if (code === 0 && out.length > 30) resolve(out);
+      else resolve(null);
+    });
+    ff.on('error', () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
+  });
+
+  // 2. EMBEDDED SUBTITLE SCAN: Prioritize native container tracks (100% frame-perfect sync)
+  let forcedFallbackVtt = null;
+  try {
+    const probe = await probeMedia(filePath);
+    const spaCandidates = (probe.allSubs || []).filter(s => {
+      const lang = (s.lang || '').toLowerCase();
+      const title = (s.title || '').toLowerCase();
+      const codec = (s.codec || '').toLowerCase();
+      const isSpa = lang.startsWith('spa') || lang.startsWith('es') || /spanish|español|castellano|latino/i.test(title);
+      const isText = ['subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text'].includes(codec);
+      return isSpa && isText;
+    });
+
+    if (spaCandidates.length > 0) {
+      // Prioritize Latin American if specified in title
+      spaCandidates.sort((a, b) => {
+        const aLat = /latino|latin|mex|419/i.test(a.title || '');
+        const bLat = /latino|latin|mex|419/i.test(b.title || '');
+        if (aLat !== bLat) return bLat ? 1 : -1;
+        return 0;
+      });
+
+      for (const cand of spaCandidates) {
+        const vtt = await extractStreamVtt(cand.index);
+        if (vtt) {
+          const cues = (vtt.match(/-->/g) || []).length;
+          if (cues >= 50) {
+            // Found full dialogue track! Save to embedded cache & standard cache and return immediately
+            try {
+              fs.writeFileSync(embeddedVttPath, vtt, 'utf8');
+              fs.writeFileSync(cachedVttPath, vtt, 'utf8');
+            } catch(e) {}
+            return vtt;
+          } else if (cues > 0 && !forcedFallbackVtt) {
+            forcedFallbackVtt = vtt;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Error probing embedded subtitles:', e.message);
+  }
+
+  // 3. If no embedded subtitles in container, check if a verified cached .es.vtt exists on disk
+  if (fs.existsSync(cachedVttPath)) {
+    try {
+      const existing = fs.readFileSync(cachedVttPath, 'utf8');
+      const cueMatches = (existing.match(/-->/g) || []).length;
+      if (cueMatches >= 50) {
+        return existing;
+      }
+    } catch (e) {}
+  }
+
+  // 3. Check if release came with verified external subtitle files in directory (e.g. Subs/Spanish.srt)
   const dir = path.dirname(filePath);
   const baseName = path.basename(filePath, path.extname(filePath));
   const candidateSubs = [
-    `${filePath}.es.vtt`,
-    `${filePath}.vtt`,
-    `${filePath}.es.srt`,
-    `${filePath}.srt`,
-    path.join(dir, `${baseName}.es.vtt`),
-    path.join(dir, `${baseName}.vtt`),
-    path.join(dir, `${baseName}.es.srt`),
-    path.join(dir, `${baseName}.srt`),
     path.join(dir, 'Spanish.srt'),
     path.join(dir, 'spanish.srt'),
     path.join(dir, '2_Spanish.srt'),
     path.join(dir, 'Subs', 'Spanish.srt'),
-    path.join(dir, 'Subs', '2_Spanish.srt')
+    path.join(dir, 'Subs', 'spanish.srt'),
+    path.join(dir, 'Subs', '2_Spanish.srt'),
+    path.join(dir, `${baseName}.srt`),
+    `${filePath}.srt`
   ];
 
   for (const c of candidateSubs) {
     if (fs.existsSync(c)) {
       try {
         const content = fs.readFileSync(c, 'utf8');
-        if (content.length > 50) {
-          if (c.endsWith('.vtt')) return content;
-          return srtToVtt(content);
+        const cues = (content.match(/-->/g) || []).length;
+        if (cues >= 50) {
+          const vtt = srtToVtt(content);
+          try { fs.writeFileSync(cachedVttPath, vtt, 'utf8'); } catch (e) {}
+          return vtt;
         }
-      } catch(e) {}
+      } catch (e) {}
     }
   }
 
-  // 2. Check if embedded text Spanish subtitle exists
-  try {
-    const probe = await probeMedia(filePath);
-    if (probe.spanishSubIndex !== null) {
-      const vtt = await new Promise((resolve) => {
-        const { spawn } = require('child_process');
-        const ff = spawn('ffmpeg', [
-          '-v', 'error',
-          '-i', filePath,
-          '-map', '0:' + probe.spanishSubIndex,
-          '-f', 'webvtt',
-          'pipe:1'
-        ]);
-        let out = '';
-        const timer = setTimeout(() => {
-          try { ff.kill('SIGKILL'); } catch (e) {}
-          resolve(null);
-        }, 5000);
-
-        ff.stdout.on('data', d => out += d);
-        ff.on('close', code => {
-          clearTimeout(timer);
-          if (code === 0 && out.length > 30) resolve(out);
-          else resolve(null);
-        });
-        ff.on('error', () => {
-          clearTimeout(timer);
-          resolve(null);
-        });
-      });
-
-      if (vtt && vtt.length > 50) {
-        try { fs.writeFileSync(`${filePath}.es.vtt`, vtt, 'utf8'); } catch(e) {}
-        return vtt;
-      }
-    }
-  } catch(e) {}
-
-  // 3. Auto-fetch Spanish subtitles via OpenSubtitles v3 / Stremio using IMDb ID
+  // 4. Auto-fetch via OpenSubtitles API (with strict anti-TELESYNC & release matching)
   try {
     const meta = torrentMetadata.get((rawId || '').toLowerCase()) || {};
     let imdbId = query.imdbId || null;
@@ -1231,15 +1296,49 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
           let d = '';
           r.on('data', c => d += c);
           r.on('end', () => {
-            try { resolve(JSON.parse(d)); } catch(e) { resolve({}); }
+            try { resolve(JSON.parse(d)); } catch (e) { resolve({}); }
           });
         });
         req.on('error', () => resolve({}));
         req.on('timeout', () => { req.destroy(); resolve({}); });
       });
 
-      const spanishSubs = (subData.subtitles || []).filter(s => s.lang === 'spa' || s.lang === 'es');
+      let spanishSubs = (subData.subtitles || []).filter(s => s.lang === 'spa' || s.lang === 'es');
+
+      // STRICT FILTER: If current file is NOT a CAM release, completely discard TELESYNC / CAM subtitles
+      const isCamFile = /\b(cam|camrip|hdcam|telesync|ts|hdts|hd-ts)\b/i.test(baseName);
+      if (!isCamFile && spanishSubs.length > 0) {
+        const nonCam = spanishSubs.filter(s => {
+          const str = `${s.url || ''} ${s.id || ''} ${s.name || ''}`.toLowerCase();
+          return !/\b(cam|camrip|hdcam|telesync|ts|hdts|hd-ts)\b/i.test(str);
+        });
+        if (nonCam.length > 0) spanishSubs = nonCam;
+      }
+
       if (spanishSubs.length > 0) {
+        const isBluray = /bluray|bdrip|brrip/i.test(baseName);
+        const isWeb = /web-dl|webdl|webrip|web\b/i.test(baseName);
+        const isHdrip = /hdrip/i.test(baseName);
+
+        spanishSubs.sort((a, b) => {
+          const strA = `${a.url || ''} ${a.id || ''} ${a.name || ''}`.toLowerCase();
+          const strB = `${b.url || ''} ${b.id || ''} ${b.name || ''}`.toLowerCase();
+
+          let scoreA = 0;
+          let scoreB = 0;
+          if (isBluray && /bluray|bdrip|brrip/i.test(strA)) scoreA += 10;
+          if (isBluray && /bluray|bdrip|brrip/i.test(strB)) scoreB += 10;
+          if (isWeb && /web-dl|webrip|web\b/i.test(strA)) scoreA += 10;
+          if (isWeb && /web-dl|webrip|web\b/i.test(strB)) scoreB += 10;
+          if (isHdrip && /hdrip/i.test(strA)) scoreA += 10;
+          if (isHdrip && /hdrip/i.test(strB)) scoreB += 10;
+
+          if (/latino|latin|mex|419/i.test(strA)) scoreA += 3;
+          if (/latino|latin|mex|419/i.test(strB)) scoreB += 3;
+
+          return scoreB - scoreA;
+        });
+
         const bestSub = spanishSubs[0];
         const srtContent = await new Promise((resolve) => {
           const req = https.get(bestSub.url, { timeout: 5000 }, r => {
@@ -1252,13 +1351,23 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
         });
 
         if (srtContent && srtContent.length > 100) {
-          try { fs.writeFileSync(`${filePath}.es.srt`, srtContent, 'utf8'); } catch(e) {}
-          return srtToVtt(srtContent);
+          const vtt = srtToVtt(srtContent);
+          const cues = (vtt.match(/-->/g) || []).length;
+          if (cues >= 30) {
+            try { fs.writeFileSync(cachedVttPath, vtt, 'utf8'); } catch (e) {}
+            return vtt;
+          }
         }
       }
     }
-  } catch(e) {
+  } catch (e) {
     console.error('Subtitle auto-fetch error:', e.message);
+  }
+
+  // 5. Fallback to forced signs track if found, otherwise placeholder
+  if (forcedFallbackVtt) {
+    try { fs.writeFileSync(cachedVttPath, forcedFallbackVtt, 'utf8'); } catch (e) {}
+    return forcedFallbackVtt;
   }
 
   return 'WEBVTT\n\nNOTE Subtitulos en Espanol no disponibles para este video\n\n';
