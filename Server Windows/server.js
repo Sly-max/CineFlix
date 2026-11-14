@@ -323,6 +323,13 @@ function stopTorrentEngine(hash, name = '', contentPath = '') {
       if (fs.existsSync(t)) {
         try { fs.rmSync(t, { recursive: true, force: true }); } catch (e) {}
       }
+      const auxExts = ['.es.vtt', '.es.srt', '.srt', '.vtt', '.keyframes.json'];
+      for (const ext of auxExts) {
+        const aux = t + ext;
+        if (fs.existsSync(aux)) {
+          try { fs.rmSync(aux, { force: true }); } catch(e) {}
+        }
+      }
     }
     try {
       if (fs.existsSync(TORRENTS_DIR)) {
@@ -435,9 +442,13 @@ function probeMedia(filePath) {
 
         const spaSub = subs.find(s => {
           const lang = s.tags && s.tags.language ? s.tags.language.toLowerCase() : '';
-          return lang.startsWith('spa') || lang.startsWith('es');
+          const title = s.tags && s.tags.title ? s.tags.title.toLowerCase() : '';
+          return lang.startsWith('spa') || lang.startsWith('es') || title.includes('spanish') || title.includes('español') || title.includes('castellano') || title.includes('latino');
         });
-        const spanishSubIndex = spaSub ? spaSub.index : (subs.length > 0 ? subs[0].index : null);
+        let spanishSubIndex = null;
+        if (spaSub && ['subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text'].includes((spaSub.codec_name || '').toLowerCase())) {
+          spanishSubIndex = spaSub.index;
+        }
 
         const res = {
           duration,
@@ -832,31 +843,74 @@ async function handleRequest(req, res) {
     const query = pathname.replace('/api/subtitles/', '');
     const videoPath = findLocalVideo(query);
     if (!videoPath) {
-      res.writeHead(404);
-      return res.end('Video not found');
+      res.writeHead(200, { 'Content-Type': 'text/vtt; charset=utf-8' });
+      return res.end('WEBVTT\n\n');
     }
 
-    const probe = await probeMedia(videoPath);
-    const subIdx = probe.spanishSubIndex !== null ? probe.spanishSubIndex : 0;
-
-    res.writeHead(200, {
-      'Content-Type': 'text/vtt; charset=utf-8',
-      'Cache-Control': 'no-cache'
-    });
-
-    const ffmpegArgs = [
-      '-v', 'error',
-      '-i', videoPath,
-      '-map', `0:${subIdx}`,
-      '-f', 'webvtt',
-      'pipe:1'
+    // 1. Check if external .vtt or .srt exists on disk
+    const dir = path.dirname(videoPath);
+    const baseName = path.basename(videoPath, path.extname(videoPath));
+    const candidateSubs = [
+      `${videoPath}.es.vtt`,
+      `${videoPath}.vtt`,
+      `${videoPath}.es.srt`,
+      `${videoPath}.srt`,
+      path.join(dir, `${baseName}.es.vtt`),
+      path.join(dir, `${baseName}.vtt`),
+      path.join(dir, `${baseName}.es.srt`),
+      path.join(dir, `${baseName}.srt`)
     ];
 
-    const child = spawn(localFfmpeg || 'ffmpeg', ffmpegArgs);
-    child.stdout.pipe(res);
-    child.on('error', () => { try { res.end(); } catch (e) {} });
-    req.on('close', () => child.kill());
-    return;
+    for (const c of candidateSubs) {
+      if (fs.existsSync(c)) {
+        try {
+          const content = fs.readFileSync(c, 'utf8');
+          if (content.length > 50) {
+            res.writeHead(200, { 'Content-Type': 'text/vtt; charset=utf-8', 'Cache-Control': 'no-cache' });
+            if (c.endsWith('.vtt')) return res.end(content);
+            const vtt = 'WEBVTT\n\n' + content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+            return res.end(vtt);
+          }
+        } catch (e) {}
+      }
+    }
+
+    // 2. Extract embedded subtitle if available
+    const probe = await probeMedia(videoPath);
+    if (probe.spanishSubIndex !== null) {
+      res.writeHead(200, {
+        'Content-Type': 'text/vtt; charset=utf-8',
+        'Cache-Control': 'no-cache'
+      });
+
+      const ffmpegArgs = [
+        '-v', 'error',
+        '-i', videoPath,
+        '-map', `0:${probe.spanishSubIndex}`,
+        '-f', 'webvtt',
+        'pipe:1'
+      ];
+
+      const child = spawn(localFfmpeg || 'ffmpeg', ffmpegArgs);
+      let captured = '';
+      child.stdout.on('data', d => {
+        captured += d;
+        res.write(d);
+      });
+      child.stdout.on('end', () => {
+        if (captured.length > 50) {
+          try { fs.writeFileSync(`${videoPath}.es.vtt`, captured, 'utf8'); } catch (e) {}
+        }
+        res.end();
+      });
+      child.on('error', () => { try { res.end(); } catch (e) {} });
+      const timer = setTimeout(() => { try { child.kill(); res.end(); } catch (e) {} }, 5000);
+      req.on('close', () => { clearTimeout(timer); child.kill(); });
+      return;
+    }
+
+    res.writeHead(200, { 'Content-Type': 'text/vtt; charset=utf-8', 'Cache-Control': 'no-cache' });
+    return res.end('WEBVTT\n\n');
   }
 
   // 12. Video Transcoding & Direct Streaming (FFmpeg)
