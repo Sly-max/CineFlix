@@ -658,14 +658,14 @@ function parseLanguageAndQuality(title, sizeBytes = 0) {
   }
 
   // 4. CERTIFIED AUTHENTIC LANGUAGE DETECTION
-  // Real Latino keywords:
-  const latinoRegex = /\b(latino|audio latino|dual latino|lat-team|mex|mexicano|latinoamericano|es-mx|es-la)\b|(\.latino\b|\.lat\b|\[lat\]|\(lat\)|\[audio\s*latino\])/i;
-  // Real Castellano keywords:
-  const castellanoRegex = /\b(castellano|español|espanol|es-es)\b|(\.castellano\b|\.spa\b|\[castellano\]|\[spa\])/i;
+  // Real Latino audio keywords:
+  const latinoRegex = /\b(latino|audio[- .]latino|dual[- .]lat|lat[- .]team|es-mx|es-la)\b/i;
+  // Real Castellano audio keywords:
+  const castellanoRegex = /\b(castellano|español|espanol|audio[- .]castellano|audio[- .]es|es-es)\b/i;
   // Indian Audio keywords:
   const indianRegex = /\b(hindi|tamil|telugu|kannada|malayalam|punjabi|urdu|bengali|marathi|gujarati|bhojpuri)\b/i;
   // Generic Multi/Dual keywords:
-  const multiRegex = /\b(multi|multiaudio|multi-audio|dual|dual-audio|multilanguage)\b/i;
+  const multiRegex = /\b(multiaudio|multi-audio|dual-audio|multilanguage)\b/i;
 
   let isLatino = false;
   let isCastellano = false;
@@ -673,10 +673,10 @@ function parseLanguageAndQuality(title, sizeBytes = 0) {
   let isIndian = false;
   let isSpanishAvailable = false;
   let langCode = 'sub';
-  let langTag = '💎 Idioma Original (Subtitulado en Español)';
+  let langTag = '💎 Idioma Original + Subs';
 
   const hasLatMatch = latinoRegex.test(t);
-  const hasCasMatch = castellanoRegex.test(t) || (/\b(spanish|spa)\b/i.test(t) && !t.includes('sub'));
+  const hasCasMatch = castellanoRegex.test(t);
 
   if (hasLatMatch && hasCasMatch) {
     isLatino = true;
@@ -868,6 +868,8 @@ async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null)
       const rawTitle = titleLines[0] || (s.behaviorHints && s.behaviorHints.filename) || 'Release';
       const metaLine = titleLines[1] || '';
 
+      const flagsLine = titleLines.slice(2).join(' ') || '';
+
       const seedMatch = metaLine.match(/👤\s*(\d+)/);
       const seeders = seedMatch ? parseInt(seedMatch[1], 10) : 0;
 
@@ -886,29 +888,41 @@ async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null)
       const provMatch = metaLine.match(/⚙️\s*([^\n\r]+)/);
       const provider = provMatch ? provMatch[1].trim() : 'Torrentio';
 
-      const fullText = `${s.name || ''} ${s.title || ''} ${(s.behaviorHints && s.behaviorHints.filename) || ''}`;
-      const meta = parseLanguageAndQuality(fullText, sizeBytes);
+      const cleanFileName = (s.behaviorHints && s.behaviorHints.filename) || rawTitle;
+      const meta = parseLanguageAndQuality(cleanFileName, sizeBytes);
 
-      // Dedicated Spanish certification for Cinecalidad and explicit Spanish tags
-      if (s.title.includes('🇲🇽') || fullText.toLowerCase().includes('cinecalidad') || /dual-lat|lat-team/i.test(fullText)) {
+      // Check if flags line explicitly announces Multi Audio or Dual Audio with Spanish/Latino
+      const isMultiAudioTorrentio = /multi audio|dual audio/i.test(flagsLine) || /\b(multi|dual|multiaudio|dual-audio|dual-lat|lat-team)\b/i.test(cleanFileName);
+      const isCinecalidad = cleanFileName.toLowerCase().includes('cinecalidad') || provider.toLowerCase().includes('cinecalidad');
+      const isSpanishProvider = ['elitetorrent', 'divxtotal', 'grantorrent', 'wolfmax4k', 'estrenosdivx', 'descargas2020'].includes(provider.toLowerCase());
+
+      if (isCinecalidad || /\b(audio[- .]latino|dual[- .]lat|lat[- .]team|es-mx|es-la)\b/i.test(cleanFileName) || (isMultiAudioTorrentio && flagsLine.includes('🇲🇽'))) {
         meta.isLatino = true;
         meta.isSpanishAvailable = true;
         meta.langCode = 'latino';
-        meta.langTag = fullText.toLowerCase().includes('cinecalidad') 
-          ? '🇲🇽 Cinecalidad Dual Latino' 
-          : '🇲🇽 Español Latino';
-      } else if (s.title.includes('🇪🇸') || /\b(castellano|español|espanol)\b/i.test(fullText) || (/\b(spanish|spa)\b/i.test(fullText) && !fullText.toLowerCase().includes('sub'))) {
+        meta.langTag = isCinecalidad ? '🇲🇽 Cinecalidad Dual Latino' : '🇲🇽 Español Latino';
+      } else if (isSpanishProvider || /\b(castellano|español|espanol|audio[- .]castellano|es-es)\b/i.test(cleanFileName) || (isMultiAudioTorrentio && flagsLine.includes('🇪🇸'))) {
         meta.isCastellano = true;
         meta.isSpanishAvailable = true;
         meta.langCode = 'castellano';
         meta.langTag = '🇪🇸 Castellano';
+      } else if (flagsLine.includes('🇪🇸') || flagsLine.includes('🇲🇽') || /\b(sub|subs|subtitulado|subtitulos)\b/i.test(cleanFileName)) {
+        // Genuine Spanish subtitles present, but audio is original!
+        meta.isLatino = false;
+        meta.isCastellano = false;
+        meta.isSpanishAvailable = false;
+        meta.hasSpanishSubs = true;
+        meta.langCode = 'sub';
+        meta.langTag = '💎 Idioma Original + Subs';
+      } else if (isMultiAudioTorrentio) {
+        meta.isMulti = true;
+        meta.langTag = '🌐 Multi-Audio';
       }
 
       const streamTrackers = (s.sources || []).filter(src => src.startsWith('tracker:')).map(src => src.replace('tracker:', ''));
       const combinedTrackers = Array.from(new Set([...streamTrackers, ...standardTrackers]));
       const trackerQuery = combinedTrackers.map(tr => `&tr=${encodeURIComponent(tr)}`).join('');
 
-      const cleanFileName = (s.behaviorHints && s.behaviorHints.filename) || rawTitle;
       const downloadUrl = `magnet:?xt=urn:btih:${s.infoHash}&dn=${encodeURIComponent(cleanFileName)}${trackerQuery}`;
 
       results.push({
@@ -2486,7 +2500,18 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
 
       const { spawn } = require('child_process');
       const rawStartSec = parseFloat(parsedUrl.query.t || '0') || 0;
-      const startSec = Math.max(0, rawStartSec);
+      let startSec = Math.max(0, rawStartSec);
+
+      // Safeguard: Clamp startSec so FFmpeg never seeks past downloaded pieces in active sequential downloads
+      const byHashStream = torrentsList.find(t => t.hash && t.hash.toLowerCase() === rawId.toLowerCase());
+      const curProg = byHashStream ? byHashStream.progress : 1;
+      const totalDur = probe.duration || 0;
+      if (curProg < 0.95 && totalDur > 0) {
+        const maxAvailSec = totalDur * curProg * 0.92;
+        if (startSec > maxAvailSec) {
+          startSec = 0;
+        }
+      }
       const targetTrack = (audioTrackIndex !== undefined && audioTrackIndex !== '')
         ? audioTrackIndex
         : (probe.preferredAudioIndex !== null ? probe.preferredAudioIndex : (probe.audioTracks[0] ? probe.audioTracks[0].index : 1));

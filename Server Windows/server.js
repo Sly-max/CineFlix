@@ -160,16 +160,16 @@ function parseLanguageAndQuality(title, sizeBytes = 0) {
   }
 
   // 4. Authentic Language Detection
-  const latinoRegex = /\b(latino|audio latino|dual latino|lat-team|mex|mexicano|latinoamericano|es-mx|es-la)\b|(\.latino\b|\.lat\b|\[lat\]|\(lat\)|\[audio\s*latino\])/i;
-  const isLatino = latinoRegex.test(t) || title.includes('🇲🇽') || /cinecalidad/i.test(t);
+  const latinoRegex = /\b(latino|audio[- .]latino|dual[- .]lat|lat[- .]team|es-mx|es-la)\b/i;
+  const isLatino = latinoRegex.test(t) || /cinecalidad/i.test(t);
 
-  const castellanoRegex = /\b(castellano|español|es-es|spa|spanish)\b|(\.castellano\b|\.esp\b|\[castellano\]|\[esp\])/i;
-  const isCastellano = (castellanoRegex.test(t) || title.includes('🇪🇸')) && !isLatino;
+  const castellanoRegex = /\b(castellano|español|espanol|audio[- .]castellano|es-es)\b/i;
+  const isCastellano = castellanoRegex.test(t) && !isLatino;
 
   const isMulti = /\b(multi|dual|multi-audio|dual-audio|mvo)\b/i.test(t);
   const isDual = /\b(dual)\b/i.test(t);
   const isSpanish = isLatino || isCastellano;
-  const isSpanishAvailable = isSpanish || (isMulti && !isCam);
+  const isSpanishAvailable = isSpanish;
 
   // 5. Resolution & Real Quality Rank (1080p Full HD prioritized as #1 for fastest download & instant universal playback)
   let quality = '1080p Full HD';
@@ -264,11 +264,35 @@ async function fetchTorrentioStreams(imdbId, mediaType = 'movie', season = null)
 
       const provMatch = metaLine.match(/⚙️\s*([^\n\r]+)/);
       const provider = provMatch ? provMatch[1].trim() : 'Torrentio';
-
-      const fullText = `${s.name || ''} ${s.title || ''} ${(s.behaviorHints && s.behaviorHints.filename) || ''}`;
-      const meta = parseLanguageAndQuality(fullText, sizeBytes);
+      const flagsLine = titleLines.slice(2).join(' ') || '';
 
       const cleanFileName = (s.behaviorHints && s.behaviorHints.filename) || rawTitle;
+      const meta = parseLanguageAndQuality(cleanFileName, sizeBytes);
+
+      // Check if flags line explicitly announces Multi Audio or Dual Audio with Spanish/Latino
+      const isMultiAudioTorrentio = /multi audio|dual audio/i.test(flagsLine) || /\b(multi|dual|multiaudio|dual-audio|dual-lat|lat-team)\b/i.test(cleanFileName);
+      const isCinecalidad = cleanFileName.toLowerCase().includes('cinecalidad') || provider.toLowerCase().includes('cinecalidad');
+
+      if (isCinecalidad || /\b(audio[- .]latino|dual[- .]lat|lat[- .]team|es-mx|es-la)\b/i.test(cleanFileName) || (isMultiAudioTorrentio && flagsLine.includes('🇲🇽'))) {
+        meta.isLatino = true;
+        meta.isSpanishAvailable = true;
+        meta.langTag = isCinecalidad ? '🇲🇽 Cinecalidad Dual Latino' : '🇲🇽 Español Latino';
+      } else if (/\b(castellano|español|espanol|audio[- .]castellano|es-es)\b/i.test(cleanFileName) || (isMultiAudioTorrentio && flagsLine.includes('🇪🇸'))) {
+        meta.isCastellano = true;
+        meta.isSpanishAvailable = true;
+        meta.langTag = '🇪🇸 Castellano';
+      } else if (flagsLine.includes('🇪🇸') || flagsLine.includes('🇲🇽') || /\b(sub|subs|subtitulado|subtitulos)\b/i.test(cleanFileName)) {
+        // Genuine Spanish subtitles present, but audio is original!
+        meta.isLatino = false;
+        meta.isCastellano = false;
+        meta.isSpanishAvailable = false;
+        meta.hasSpanishSubs = true;
+        meta.langTag = '💎 Idioma Original + Subs';
+      } else if (isMultiAudioTorrentio) {
+        meta.isMulti = true;
+        meta.langTag = '🌐 Multi-Audio';
+      }
+
       const downloadUrl = `magnet:?xt=urn:btih:${s.infoHash}&dn=${encodeURIComponent(cleanFileName)}${trackerQuery}`;
 
       results.push({
@@ -1000,18 +1024,38 @@ async function handleRequest(req, res) {
 
   // 10. Video Media Probing
   if (pathname.startsWith('/api/media-info/')) {
-    const query = pathname.replace('/api/media-info/', '');
+    const query = decodeURIComponent(pathname.replace('/api/media-info/', ''));
     const videoPath = findLocalVideo(query);
     if (!videoPath) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ duration: 0, ready: false }));
+      return res.end(JSON.stringify({ ok: false, duration: 0, ready: false }));
     }
+
+    let engMatch = null;
+    for (const [hash, eng] of activeTorrentEngines.entries()) {
+      if (query && (hash === query.toLowerCase() || (eng.contentPath && eng.contentPath.includes(query)) || (eng.customTitle && eng.customTitle.toLowerCase().includes(query.toLowerCase())))) {
+        engMatch = eng;
+        break;
+      }
+    }
+    const stat = fs.existsSync(videoPath) ? fs.statSync(videoPath) : { size: 0 };
+    const downloaded = engMatch && engMatch.swarm ? engMatch.swarm.downloaded : stat.size;
+    const total = engMatch && engMatch.torrent ? engMatch.torrent.length : stat.size;
+    const progress = total > 0 ? (downloaded / total) : 1;
+    const isReady = (progress >= 0.99) || (downloaded >= 10 * 1024 * 1024);
 
     const info = await probeMedia(videoPath);
     const ext = path.extname(videoPath).toLowerCase();
     const canDirectStream = ['.mp4', '.m4v'].includes(ext) && !!info.isAudioCompatible;
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ...info, ready: info.duration > 0, directStream: canDirectStream }));
+    return res.end(JSON.stringify({
+      ok: true,
+      ready: isReady && info.duration > 0,
+      duration: info.duration || 0,
+      progress: progress,
+      directStream: canDirectStream,
+      ...info
+    }));
   }
 
 function isSpanishText(text) {
@@ -1295,25 +1339,44 @@ async function getOrFetchSpanishSubtitles(filePath, query = {}) {
 
   // 12. Video Transcoding & Direct Streaming (FFmpeg)
   if (pathname.startsWith('/stream/')) {
-    const query = pathname.replace('/stream/', '');
+    const query = decodeURIComponent(pathname.replace('/stream/', ''));
     const videoPath = findLocalVideo(query);
     if (!videoPath) {
       res.writeHead(404);
       return res.end('Video not found or downloading initial pieces...');
     }
 
-    const seekSeconds = parseFloat(parsedUrl.query.t || parsedUrl.query.ss || '0') || 0;
+    let seekSeconds = parseFloat(parsedUrl.query.t || parsedUrl.query.ss || '0') || 0;
     const audioTrack = (parsedUrl.query.track !== undefined && parsedUrl.query.track !== '')
       ? parsedUrl.query.track
       : (parsedUrl.query.audio || null);
+
+    const probe = await probeMedia(videoPath);
+
+    // Safeguard: Clamp seekSeconds so FFmpeg never seeks past downloaded pieces in active sequential downloads
+    let engMatch = null;
+    for (const [hash, eng] of activeTorrentEngines.entries()) {
+      if (query && (hash === query.toLowerCase() || (eng.contentPath && eng.contentPath.includes(query)) || (eng.customTitle && eng.customTitle.toLowerCase().includes(query.toLowerCase())))) {
+        engMatch = eng;
+        break;
+      }
+    }
+    const curProg = engMatch && engMatch.torrent && engMatch.torrent.length > 0
+      ? (engMatch.swarm ? engMatch.swarm.downloaded / engMatch.torrent.length : 0)
+      : 1;
+    const totalDur = probe.duration || 0;
+    if (curProg < 0.95 && totalDur > 0) {
+      const maxAvailSec = totalDur * curProg * 0.92;
+      if (seekSeconds > maxAvailSec) {
+        seekSeconds = 0;
+      }
+    }
 
     res.writeHead(200, {
       'Content-Type': 'video/mp4',
       'Accept-Ranges': 'none',
       'Cache-Control': 'no-cache'
     });
-
-    const probe = await probeMedia(videoPath);
     const isHevc = ['hevc', 'h265'].includes((probe.videoCodec || '').toLowerCase());
 
     const ffmpegArgs = [

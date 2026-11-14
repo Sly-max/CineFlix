@@ -1938,21 +1938,31 @@
       }
     }
 
-    function getHistoryItemForMedia(tmdbId, mediaType, season = null, episode = null, filename = '') {
+    function getHistoryItemForMedia(tmdbId, mediaType, season = null, episode = null, filename = '', hash = '') {
       if (!watchHistory || watchHistory.length === 0) return null;
       if (mediaType === 'tv' && season !== null && episode !== null) {
         const targetId = 'tv_' + tmdbId + '_s' + season + '_e' + episode;
         const found = watchHistory.find(h => h.id === targetId);
         if (found) return found;
       }
-      if (tmdbId) {
-        const found = watchHistory.find(h => h.tmdbId == tmdbId && (mediaType !== 'tv' || !season || h.season == season));
+      // 1. Highest priority: exact torrent hash
+      if (hash) {
+        const cleanHash = hash.toLowerCase();
+        const found = watchHistory.find(h => h.hash && h.hash.toLowerCase() === cleanHash);
         if (found) return found;
       }
+      // 2. Next priority: exact filename
       if (filename) {
-        const cleanFn = filename.toLowerCase();
-        const found = watchHistory.find(h => h.filename && h.filename.toLowerCase() === cleanFn);
+        const cleanFn = decodeURIComponent(filename).toLowerCase();
+        const found = watchHistory.find(h => h.filename && decodeURIComponent(h.filename).toLowerCase() === cleanFn);
         if (found) return found;
+      }
+      // 3. Fallback: tmdbId ONLY if media is TV or single matching movie
+      if (tmdbId) {
+        const matches = watchHistory.filter(h => h.tmdbId == tmdbId && (mediaType !== 'tv' || !season || h.season == season));
+        if (matches.length === 1 && (!matches[0].hash || !hash || matches[0].hash.toLowerCase() === hash.toLowerCase())) {
+          return matches[0];
+        }
       }
       return null;
     }
@@ -1970,7 +1980,7 @@
       if (currentPlayingMediaType === 'tv') {
         itemId = 'tv_' + (currentPlayingTmdbId || currentPlayingTitle) + '_s' + (currentPlayingSeason || 1) + '_e' + (currentPlayingEpisode || 1);
       } else {
-        itemId = 'movie_' + (currentPlayingTmdbId || currentPlayingTitle || currentPlayingHash);
+        itemId = 'movie_' + (currentPlayingHash || currentPlayingFile || currentPlayingTmdbId || currentPlayingTitle);
       }
 
       const historyItem = {
@@ -3381,7 +3391,7 @@
       }
 
       if (initialSeek === null || initialSeek === undefined) {
-        const saved = getHistoryItemForMedia(tmdbId, mediaType, currentPlayingSeason, currentPlayingEpisode, filename);
+        const saved = getHistoryItemForMedia(tmdbId, mediaType, currentPlayingSeason, currentPlayingEpisode, filename, hash);
         if (saved && saved.lastTime > 15 && saved.lastTime < (saved.duration - 60)) {
           initialSeek = saved.lastTime;
         } else {
@@ -3410,6 +3420,16 @@
           isReady = info.ready;
           mediaTotalDuration = info.duration || 0;
           currentDownloadProgress = info.progress !== undefined ? info.progress : 1;
+
+          // In-progress download safety clamp: Never seek past downloaded chunks
+          if (currentDownloadProgress < 0.95 && mediaTotalDuration > 0) {
+            const maxAvailSec = mediaTotalDuration * currentDownloadProgress * 0.92;
+            if (initialSeek > maxAvailSec) {
+              console.log('Clamping seek: file download is at', Math.round(currentDownloadProgress * 100), '%, starting from 0');
+              initialSeek = 0;
+              currentStreamOffset = 0;
+            }
+          }
 
           if (!isDirectStreamMode && initialSeek > 0 && window.currentMediaKeyframes.length > 0) {
             currentStreamOffset = getPrecedingKeyframe(initialSeek);
