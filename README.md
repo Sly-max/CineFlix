@@ -1,7 +1,7 @@
 # 🎬 CineFlix - Plataforma de Streaming y Centro de Medios
 
-[![Windows Release](https://img.shields.io/badge/Descargar%20Instalador-Windows%20Setup%20(151%20MB)-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Sly-max/CineFlix/releases/download/v1.0.0/CineFlix-Setup-v1.0.0.exe)
-[![GitHub Release](https://img.shields.io/github/v/release/Sly-max/CineFlix?style=for-the-badge&color=green)](https://github.com/Sly-max/CineFlix/releases/tag/v1.0.0)
+[![Windows Release](https://img.shields.io/badge/Descargar%20Instalador-Windows%20Setup%20v1.1.0-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Sly-max/CineFlix/releases/download/v1.1.0/CineFlix-Setup-v1.1.0.exe)
+[![GitHub Release](https://img.shields.io/github/v/release/Sly-max/CineFlix?style=for-the-badge&color=green)](https://github.com/Sly-max/CineFlix/releases/latest)
 
 CineFlix es un centro multimedia cinemático con streaming directo en navegador sin esperas, selección de pistas de audio (Español Latino / Inglés) en vivo, sincronización frame-accurate de subtítulos, carruseles por categoría y guardado de historial de reproducción.
 
@@ -17,7 +17,7 @@ CineFlix/
 
 ## 🪟 1. Server Windows (100% Autónomo - Doble Clic y Listo)
 
-* **Instalador Oficial Todo-en-Uno:** Descargá y ejecutá [`CineFlix-Setup-v1.0.0.exe`](https://github.com/Sly-max/CineFlix/releases/download/v1.0.0/CineFlix-Setup-v1.0.0.exe).
+* **Instalador Oficial Todo-en-Uno:** Descargá y ejecutá [`CineFlix-Setup-v1.1.0.exe`](https://github.com/Sly-max/CineFlix/releases/download/v1.1.0/CineFlix-Setup-v1.1.0.exe).
 * **100% Independiente:** No requiere Docker, no requiere Proxmox, no requiere instalar Node.js ni configurar nada.
 * **Catálogo Global Cinemeta:** Tendencias, películas, series y detalles directamente desde la nube.
 * **Motor de Torrents Integrado:** Descarga y hace streaming secuencial en vivo en tu disco local.
