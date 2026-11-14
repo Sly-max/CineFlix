@@ -3568,6 +3568,9 @@
               } else {
                 isDirectStreamMode = !!info.directStream;
               }
+              if (parsedSubtitles.length === 0) {
+                loadSubtitlesForCurrentMedia();
+              }
               startNativePlayback(currentStreamOffset);
             }
           }
@@ -3656,6 +3659,7 @@
         const display = document.getElementById('timeDisplay');
         if (display) display.innerText = `${formatTime(curMovieTime)} / ${formatTime(mediaTotalDuration)}`;
         updateSliderBufferVisual(curMovieTime);
+        renderCurrentSubtitle();
 
         // Periodically persist watch progress
         saveCurrentPlaybackProgress(curMovieTime, mediaTotalDuration, false);
@@ -3834,6 +3838,7 @@
           btn.style.cursor = 'pointer';
         }
         updateSubtitleUI();
+        renderCurrentSubtitle();
       } else {
         if (statusSpan) statusSpan.innerText = 'No disponibles';
         if (btn) {

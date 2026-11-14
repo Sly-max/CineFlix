@@ -1175,6 +1175,8 @@ function injectStandardTrackers(magnetUrl) {
   return res;
 }
 
+const activeSubExtractions = new Map();
+
 async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
   if (!filePath || !fs.existsSync(filePath)) {
     return 'WEBVTT\n\n';
@@ -1194,89 +1196,110 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
     } catch (e) {}
   }
 
-  const extractStreamVtt = (streamIndex) => new Promise((resolve) => {
-    const { spawn } = require('child_process');
-    const ff = spawn('ffmpeg', [
-      '-v', 'error',
-      '-i', filePath,
-      '-map', '0:' + streamIndex,
-      '-f', 'webvtt',
-      'pipe:1'
-    ]);
-    let out = '';
-    const timer = setTimeout(() => {
-      try { ff.kill('SIGKILL'); } catch (e) {}
-      resolve(null);
-    }, 6000);
+  // De-duplicate concurrent extractions for the same file
+  if (activeSubExtractions.has(filePath)) {
+    try {
+      const res = await activeSubExtractions.get(filePath);
+      if (res && res.length > 50) return res;
+    } catch (e) {}
+  }
 
-    ff.stdout.on('data', d => out += d);
-    ff.on('close', code => {
-      clearTimeout(timer);
-      if (code === 0 && out.length > 30) resolve(out);
-      else resolve(null);
-    });
-    ff.on('error', () => {
-      clearTimeout(timer);
-      resolve(null);
-    });
-  });
-
-  // 2. EMBEDDED SUBTITLE SCAN: Prioritize native container tracks (100% frame-perfect sync)
-  let forcedFallbackVtt = null;
-  try {
-    const probe = await probeMedia(filePath);
-    const spaCandidates = (probe.allSubs || []).filter(s => {
-      const lang = (s.lang || '').toLowerCase();
-      const title = (s.title || '').toLowerCase();
-      const codec = (s.codec || '').toLowerCase();
-      const isSpa = lang.startsWith('spa') || lang.startsWith('es') || /spanish|español|castellano|latino/i.test(title);
-      const isText = ['subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text'].includes(codec);
-      return isSpa && isText;
-    });
-
-    if (spaCandidates.length > 0) {
-      // Prioritize Latin American if specified in title
-      spaCandidates.sort((a, b) => {
-        const aLat = /latino|latin|mex|419/i.test(a.title || '');
-        const bLat = /latino|latin|mex|419/i.test(b.title || '');
-        if (aLat !== bLat) return bLat ? 1 : -1;
-        return 0;
+  const extractPromise = (async () => {
+    // 2. EMBEDDED SUBTITLE SCAN: Prioritize native container tracks (100% frame-perfect sync)
+    let forcedFallbackVtt = null;
+    let hasEmbeddedSpanish = false;
+    try {
+      const probe = await probeMedia(filePath);
+      const spaCandidates = (probe.allSubs || []).filter(s => {
+        const lang = (s.lang || '').toLowerCase();
+        const title = (s.title || '').toLowerCase();
+        const codec = (s.codec || '').toLowerCase();
+        const isSpa = lang.startsWith('spa') || lang.startsWith('es') || /spanish|español|castellano|latino/i.test(title);
+        const isText = ['subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text'].includes(codec);
+        return isSpa && isText;
       });
 
-      for (const cand of spaCandidates) {
-        const vtt = await extractStreamVtt(cand.index);
-        if (vtt) {
-          const cues = (vtt.match(/-->/g) || []).length;
-          if (cues >= 50 && isSpanishText(vtt)) {
-            // Found full dialogue track! Save to embedded cache & standard cache and return immediately
-            try {
-              fs.writeFileSync(embeddedVttPath, vtt, 'utf8');
-              fs.writeFileSync(cachedVttPath, vtt, 'utf8');
-            } catch(e) {}
-            return vtt;
-          } else if (cues > 0 && !forcedFallbackVtt && isSpanishText(vtt)) {
-            forcedFallbackVtt = vtt;
+      if (spaCandidates.length > 0) {
+        hasEmbeddedSpanish = true;
+        // Prioritize Latin American if specified in title
+        spaCandidates.sort((a, b) => {
+          const aLat = /latino|latin|mex|419/i.test(a.title || '');
+          const bLat = /latino|latin|mex|419/i.test(b.title || '');
+          if (aLat !== bLat) return bLat ? 1 : -1;
+          return 0;
+        });
+
+        const extractStreamVtt = (streamIndex) => new Promise((resolve) => {
+          const { spawn } = require('child_process');
+          const ff = spawn('ffmpeg', [
+            '-v', 'error',
+            '-i', filePath,
+            '-map', '0:' + streamIndex,
+            '-f', 'webvtt',
+            'pipe:1'
+          ]);
+          let out = '';
+          const timer = setTimeout(() => {
+            try { ff.kill('SIGKILL'); } catch (e) {}
+            resolve(null);
+          }, 60000); // 60s timeout for large 4K files
+
+          ff.stdout.on('data', d => out += d);
+          ff.on('close', code => {
+            clearTimeout(timer);
+            if (code === 0 && out.length > 30) resolve(out);
+            else resolve(null);
+          });
+          ff.on('error', () => {
+            clearTimeout(timer);
+            resolve(null);
+          });
+        });
+
+        for (const cand of spaCandidates) {
+          const vtt = await extractStreamVtt(cand.index);
+          if (vtt) {
+            const cues = (vtt.match(/-->/g) || []).length;
+            if (cues >= 50 && isSpanishText(vtt)) {
+              // Found full dialogue track! Save to embedded cache & standard cache and return immediately
+              try {
+                fs.writeFileSync(embeddedVttPath, vtt, 'utf8');
+                fs.writeFileSync(cachedVttPath, vtt, 'utf8');
+              } catch(e) {}
+              return vtt;
+            } else if (cues > 0 && !forcedFallbackVtt && isSpanishText(vtt)) {
+              forcedFallbackVtt = vtt;
+            }
           }
         }
       }
+    } catch (e) {
+      console.error('Error probing embedded subtitles:', e.message);
     }
-  } catch (e) {
-    console.error('Error probing embedded subtitles:', e.message);
-  }
 
-  // 3. If no embedded subtitles in container, check if a verified cached .es.vtt exists on disk and is Spanish
-  if (fs.existsSync(cachedVttPath)) {
-    try {
-      const existing = fs.readFileSync(cachedVttPath, 'utf8');
-      const cueMatches = (existing.match(/-->/g) || []).length;
-      if (cueMatches >= 30 && isSpanishText(existing)) {
-        return existing;
-      } else {
-        // Stale or non-Spanish cached file - remove it immediately
-        try { fs.unlinkSync(cachedVttPath); } catch(e) {}
-      }
-    } catch (e) {}
-  }
+    // If container has embedded Spanish subtitles, NEVER fall back to out-of-sync OpenSubtitles
+    if (hasEmbeddedSpanish && forcedFallbackVtt) {
+      try {
+        fs.writeFileSync(embeddedVttPath, forcedFallbackVtt, 'utf8');
+        fs.writeFileSync(cachedVttPath, forcedFallbackVtt, 'utf8');
+      } catch(e) {}
+      return forcedFallbackVtt;
+    }
+
+    // 3. ONLY if container has NO embedded Spanish subtitles:
+    // Check if a verified cached .es.vtt exists on disk and is Spanish
+    if (!hasEmbeddedSpanish && fs.existsSync(cachedVttPath)) {
+      try {
+        const existing = fs.readFileSync(cachedVttPath, 'utf8');
+        const cueMatches = (existing.match(/-->/g) || []).length;
+        if (cueMatches >= 30 && isSpanishText(existing)) {
+          return existing;
+        } else {
+          // Stale or non-Spanish cached file - remove it immediately
+          try { fs.unlinkSync(cachedVttPath); } catch(e) {}
+        }
+      } catch (e) {}
+    }
 
   // 3. Check if release came with verified external subtitle files in directory (e.g. Subs/Spanish.srt)
   // Strictly verify dialogue language is SPANISH (rejects bundled English .srt from YTS/RARBG releases)
@@ -1447,6 +1470,14 @@ async function getOrFetchSpanishSubtitles(filePath, rawId, query = {}) {
   }
 
   return 'WEBVTT\n\nNOTE Subtitulos en Espanol no disponibles para este video\n\n';
+  })();
+
+  activeSubExtractions.set(filePath, extractPromise);
+  try {
+    return await extractPromise;
+  } finally {
+    activeSubExtractions.delete(filePath);
+  }
 }
 
 
@@ -2407,6 +2438,11 @@ caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
     
     if (stat.size >= 2 * 1024 * 1024) {
       probe = await probeMedia(filePath);
+      // Auto-warm embedded subtitles extraction in background if available
+      const embeddedVttPath = `${filePath}.embedded.es.vtt`;
+      if (!fs.existsSync(embeddedVttPath) && (probe.allSubs || []).some(s => (s.lang || '').startsWith('es') || (s.lang || '').startsWith('spa') || /spanish|español|castellano|latino/i.test(s.title || ''))) {
+        getOrFetchSpanishSubtitles(filePath, rawId).catch(() => {});
+      }
     }
 
     const ext = path.extname(filePath).toLowerCase();
